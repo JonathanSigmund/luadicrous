@@ -1,24 +1,55 @@
 [workspace]
+resolver = "2"
 members = [
-    "cfg",
     "ast",
-    "lua51-lifter",
+    "cfg",
+    "crates/luadicrous-bytecode",
+    "crates/luadicrous-ir",
+    "crates/luadicrous-core",
+    "crates/luadicrous-cli",
+    "crates/luadicrous-server",
     "lua51-deserializer",
+    "lua51-lifter",
     "luau-lifter",
     "restructure",
-    "luau-worker",
 ]
+exclude = ["luau-worker"]
 
 [workspace.package]
-edition = "2021"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
 authors = [
-    "Mathias Pedersen <mathias.pedersen834@gmail.com>",
-    "Jujhar Singh <jujharsmc@gmail.com>",
-    "Amit Bashan <amit.bashan@icloud.com>",
+    "The Medal contributors",
+    "The Luadicrous contributors",
 ]
+repository = "https://github.com/JonathanSigmund/luadicrous"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+axum = { version = "0.8.4", features = ["multipart"] }
+clap = { version = "4.5.41", features = ["derive"] }
+http-body-util = "0.1.3"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+petgraph = "0.6.5"
+tokio = { version = "1.45.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tower = { version = "0.5.2", features = ["util"] }
+tower-http = { version = "0.6.6", features = ["cors", "limit", "trace"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
 
 [profile.release]
-debug = true
-lto = true
-# strip = true
-# panic = "abort"
+codegen-units = 1
+lto = "thin"
+panic = "unwind"
+strip = "symbols"

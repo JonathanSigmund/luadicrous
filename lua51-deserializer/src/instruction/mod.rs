@@ -1,11 +1,9 @@
-use nom::{
-    error::{Error, ErrorKind, ParseError},
-    Err, IResult,
-};
-use num_traits::ToPrimitive;
-
 use argument::{Constant, Function, Register, RegisterOrConstant, Upvalue};
 use layout::Layout;
+use nom::{
+    Err, IResult,
+    error::{Error, ErrorKind, ParseError},
+};
 use operation_code::OperationCode;
 
 pub mod argument;
@@ -22,7 +20,7 @@ impl RawInstruction {
         // while parsing the layout.
         // we should instead read the instruction here and pass it to Layout::parse
         let operation_code = OperationCode::parse(input).map(|r| r.1)?;
-        let (input, layout) = Layout::parse(input, operation_code.to_u8().unwrap())?;
+        let (input, layout) = Layout::parse(input, operation_code as u8)?;
 
         Ok((input, Self(operation_code, layout)))
     }
@@ -367,17 +365,18 @@ impl Instruction {
                 }
             }
             RawInstruction(OperationCode::IterateGenericForLoop, Layout::BC { a, c, .. }) => {
+                if c == 0 {
+                    return Err(Err::Failure(Error::from_error_kind(
+                        input,
+                        ErrorKind::Verify,
+                    )));
+                }
                 let res = Self::IterateGenericForLoop {
                     generator: Register(a),
                     state: Register(a + 1),
                     internal_control: Register(a + 2),
                     vars: (a + 3..a + 3 + c as u8).map(Register).collect(),
                 };
-                // must have at least external control variable
-                assert!(match &res {
-                    Self::IterateGenericForLoop { vars, .. } => !vars.is_empty(),
-                    _ => unreachable!(),
-                });
                 res
             }
             RawInstruction(OperationCode::SetList, Layout::BC { a, b, c }) => Self::SetList {
@@ -397,7 +396,7 @@ impl Instruction {
                 return Err(Err::Failure(Error::from_error_kind(
                     input,
                     ErrorKind::Switch,
-                )))
+                )));
             }
         };
 

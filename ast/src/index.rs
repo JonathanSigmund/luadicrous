@@ -1,4 +1,4 @@
-use crate::{formatter::Formatter, has_side_effects, LocalRw, RcLocal, Traverse};
+use crate::{LocalRw, RcLocal, Traverse, formatter::Formatter, has_side_effects};
 
 use super::RValue;
 use std::fmt;
@@ -26,7 +26,7 @@ impl LocalRw for Index {
         self.left
             .values_read()
             .into_iter()
-            .chain(self.right.values_read().into_iter())
+            .chain(self.right.values_read())
             .collect()
     }
 
@@ -34,7 +34,7 @@ impl LocalRw for Index {
         self.left
             .values_read_mut()
             .into_iter()
-            .chain(self.right.values_read_mut().into_iter())
+            .chain(self.right.values_read_mut())
             .collect()
     }
 }

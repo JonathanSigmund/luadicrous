@@ -1,7 +1,7 @@
 use super::list::parse_list;
 use nom::{
-    number::complete::{le_f32, le_f64, le_u32, le_u8},
     IResult,
+    number::complete::{le_f32, le_f64, le_u8, le_u32},
 };
 use nom_leb128::leb128_usize;
 
@@ -14,6 +14,7 @@ const CONSTANT_TABLE: u8 = 5;
 const CONSTANT_CLOSURE: u8 = 6;
 const CONSTANT_VECTOR: u8 = 7;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Constant {
     Nil,
@@ -22,8 +23,10 @@ pub enum Constant {
     String(usize),
     Import(usize),
     Table(Vec<usize>),
+    TableWithValues(Vec<(usize, Option<usize>)>),
     Closure(usize),
     Vector(f32, f32, f32, f32),
+    VectorDouble(f64, f64, f64, f64),
 }
 
 impl Constant {

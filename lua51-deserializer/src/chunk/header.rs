@@ -1,31 +1,31 @@
 use nom::{
+    Err, IResult,
     bytes::complete::tag,
     error::{Error, ErrorKind, ParseError},
     number::complete::le_u8,
-    Err, IResult,
 };
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endianness {
     Big,
     Little,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Official,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Header {
-    pub(crate) version_number: u8,
-    pub(crate) format: Format,
-    pub(crate) endianness: Endianness,
-    pub(crate) int_width: u8,
-    pub(crate) size_t_width: u8,
-    pub(crate) instr_width: u8,
-    pub(crate) number_width: u8,
-    pub(crate) number_is_integral: bool,
+    pub version_number: u8,
+    pub format: Format,
+    pub endianness: Endianness,
+    pub int_width: u8,
+    pub size_t_width: u8,
+    pub instr_width: u8,
+    pub number_width: u8,
+    pub number_is_integral: bool,
 }
 
 impl Header {

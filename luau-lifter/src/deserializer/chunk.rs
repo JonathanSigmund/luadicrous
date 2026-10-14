@@ -1,8 +1,8 @@
 use super::{function::Function, list::parse_list, parse_string};
+use nom::IResult;
 use nom::character::complete::char;
 use nom::multi::many_till;
 use nom::number::complete::le_u8;
-use nom::IResult;
 use nom_leb128::leb128_usize;
 
 #[derive(Debug)]

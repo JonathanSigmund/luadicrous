@@ -14,7 +14,11 @@ pub(crate) struct UpvaluesOpen {
 }
 
 impl UpvaluesOpen {
-    pub fn new(function: &Function, old_locals: FxHashMap<ast::RcLocal, ast::RcLocal>) -> Self {
+    pub fn new(
+        function: &Function,
+        old_locals: FxHashMap<ast::RcLocal, ast::RcLocal>,
+        inherited_upvalues: &FxHashSet<ast::RcLocal>,
+    ) -> Self {
         let mut this = Self {
             open: Default::default(),
             old_locals,
@@ -41,6 +45,7 @@ impl UpvaluesOpen {
                             ast::Upvalue::Ref(l) => Some(l),
                         })
                         .map(|l| this.old_locals[l].clone())
+                        .filter(|local| !inherited_upvalues.contains(local))
                     {
                         let open_ranges = block_opened.entry(opened).or_default();
                         let mut open_locations = Vec::new();
@@ -104,5 +109,50 @@ impl UpvaluesOpen {
             }
         }
         this
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpvaluesOpen;
+    use crate::function::Function;
+    use ast::{Closure, Local, RcLocal, Upvalue};
+    use by_address::ByAddress;
+    use parking_lot::Mutex;
+    use rustc_hash::{FxHashMap, FxHashSet};
+    use triomphe::Arc;
+
+    #[test]
+    fn skips_inherited_upvalues_but_tracks_local_reference_captures() {
+        let inherited_old = RcLocal::new(Local::new(Some("inherited".to_owned())));
+        let inherited_ssa = RcLocal::default();
+        let local_old = RcLocal::new(Local::new(Some("localValue".to_owned())));
+        let local_ssa = RcLocal::default();
+        let closure_local = RcLocal::default();
+        let closure = Closure {
+            function: ByAddress(Arc::new(Mutex::new(ast::Function::default()))),
+            upvalues: vec![
+                Upvalue::Ref(inherited_ssa.clone()),
+                Upvalue::Ref(local_ssa.clone()),
+            ],
+        };
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        function.set_entry(entry);
+        function
+            .block_mut(entry)
+            .unwrap()
+            .push(ast::Assign::new(vec![closure_local.into()], vec![closure.into()]).into());
+        let old_locals = FxHashMap::from_iter([
+            (inherited_ssa, inherited_old.clone()),
+            (local_ssa, local_old.clone()),
+        ]);
+        let inherited = FxHashSet::from_iter([inherited_old.clone()]);
+
+        let open = UpvaluesOpen::new(&function, old_locals, &inherited);
+        let entry_open = &open.open[&entry];
+
+        assert!(!entry_open.contains_key(&inherited_old));
+        assert!(entry_open.contains_key(&local_old));
     }
 }

@@ -1,11 +1,9 @@
-#![feature(let_chains)]
-
 use cfg::{block::BranchType, function::Function};
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use petgraph::{
-    algo::dominators::{simple_fast, Dominators},
+    algo::dominators::{Dominators, simple_fast},
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     visit::*,
 };
@@ -36,6 +34,7 @@ struct GraphStructurer {
     pub function: Function,
     loop_headers: FxHashSet<NodeIndex>,
     label_to_node: FxHashMap<ast::Label, NodeIndex>,
+    duplicated_statements: usize,
 }
 
 impl GraphStructurer {
@@ -56,6 +55,7 @@ impl GraphStructurer {
             function,
             loop_headers: FxHashSet::default(),
             label_to_node: FxHashMap::default(),
+            duplicated_statements: 0,
         };
         this.find_loop_headers();
         this
@@ -74,6 +74,11 @@ impl GraphStructurer {
         let successors = self.function.successor_blocks(node).collect_vec();
 
         // cfg::dot::render_to(&self.function, &mut std::io::stdout()).unwrap();
+        if self.try_collapse_terminal_conditional(node) {
+            self.find_loop_headers();
+            return true;
+        }
+
         if self.try_collapse_loop(node, dominators, post_dom) {
             self.find_loop_headers();
             // println!("matched loop");
@@ -357,4 +362,162 @@ impl GraphStructurer {
 
 pub fn lift(function: cfg::function::Function) -> ast::Block {
     GraphStructurer::new(function).structure()
+}
+
+#[cfg(test)]
+mod tests {
+    use ast::{Local, RcLocal};
+    use cfg::{
+        block::{BlockEdge, BranchType},
+        function::Function,
+    };
+
+    use super::lift;
+
+    fn call(name: &str) -> ast::Statement {
+        ast::Call::new(ast::Global::from(name).into(), Vec::new()).into()
+    }
+
+    fn add_condition(
+        function: &mut Function,
+        node: petgraph::stable_graph::NodeIndex,
+        condition: &str,
+        then_node: petgraph::stable_graph::NodeIndex,
+        else_node: petgraph::stable_graph::NodeIndex,
+    ) {
+        function.block_mut(node).unwrap().push(
+            ast::If::new(
+                ast::Global::from(condition).into(),
+                ast::Block::default(),
+                ast::Block::default(),
+            )
+            .into(),
+        );
+        function.set_edges(
+            node,
+            vec![
+                (then_node, BlockEdge::new(BranchType::Then)),
+                (else_node, BlockEdge::new(BranchType::Else)),
+            ],
+        );
+    }
+
+    fn assert_structured(output: &str) {
+        assert!(!output.contains("goto "), "unexpected goto:\n{output}");
+        assert!(!output.contains("::l"), "unexpected label:\n{output}");
+        assert!(
+            !output.contains("NumForInit"),
+            "unlowered loop marker:\n{output}"
+        );
+        assert!(
+            !output.contains("NumForNext"),
+            "unlowered loop marker:\n{output}"
+        );
+    }
+
+    #[test]
+    fn folds_terminal_branch_into_guard() {
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        let terminal = function.new_block();
+        let continuation = function.new_block();
+        let exit = function.new_block();
+        function.set_entry(entry);
+
+        add_condition(&mut function, entry, "shouldReturn", terminal, continuation);
+        function
+            .block_mut(terminal)
+            .unwrap()
+            .push(ast::Return::new(vec![ast::Literal::Number(7.0).into()]).into());
+        function.block_mut(continuation).unwrap().push(call("work"));
+        function.set_edges(
+            continuation,
+            vec![(exit, BlockEdge::new(BranchType::Unconditional))],
+        );
+        function
+            .block_mut(exit)
+            .unwrap()
+            .push(ast::Return::default().into());
+
+        let output = lift(function).to_string();
+        assert_structured(&output);
+        assert!(output.contains("if shouldReturn then"), "{output}");
+        assert!(output.contains("return 7"), "{output}");
+        assert!(output.contains("work()"), "{output}");
+    }
+
+    #[test]
+    fn collapses_conditional_latch_into_repeat_until() {
+        let mut function = Function::new(0);
+        let header = function.new_block();
+        let latch = function.new_block();
+        let exit = function.new_block();
+        function.set_entry(header);
+
+        function.block_mut(header).unwrap().push(call("tick"));
+        function.set_edges(
+            header,
+            vec![(latch, BlockEdge::new(BranchType::Unconditional))],
+        );
+        add_condition(&mut function, latch, "finished", exit, header);
+        function.block_mut(exit).unwrap().push(call("done"));
+
+        let output = lift(function).to_string();
+        assert_structured(&output);
+        assert!(output.contains("repeat"), "{output}");
+        assert!(output.contains("until finished"), "{output}");
+        assert!(output.contains("tick()"), "{output}");
+        assert!(output.contains("done()"), "{output}");
+    }
+
+    #[test]
+    fn structures_numeric_for_body_entry_continue() {
+        let mut function = Function::new(0);
+        let init = function.new_block();
+        let header = function.new_block();
+        let body = function.new_block();
+        let work = function.new_block();
+        let exit = function.new_block();
+        function.set_entry(init);
+
+        let counter = RcLocal::new(Local::new(Some("index".to_owned())));
+        let limit = RcLocal::new(Local::new(Some("limit".to_owned())));
+        let step = RcLocal::new(Local::new(Some("step".to_owned())));
+        function
+            .block_mut(init)
+            .unwrap()
+            .push(ast::NumForInit::new(counter.clone(), limit.clone(), step.clone()).into());
+        function.set_edges(
+            init,
+            vec![(header, BlockEdge::new(BranchType::Unconditional))],
+        );
+        function
+            .block_mut(header)
+            .unwrap()
+            .push(ast::NumForNext::new(counter, limit.into(), step.into()).into());
+        function.set_edges(
+            header,
+            vec![
+                (body, BlockEdge::new(BranchType::Then)),
+                (exit, BlockEdge::new(BranchType::Else)),
+            ],
+        );
+        add_condition(&mut function, body, "skip", header, work);
+        function.block_mut(work).unwrap().push(call("process"));
+        function.set_edges(
+            work,
+            vec![(header, BlockEdge::new(BranchType::Unconditional))],
+        );
+        function.block_mut(exit).unwrap().push(call("done"));
+
+        let output = lift(function).to_string();
+        assert_structured(&output);
+        assert!(output.contains("for index ="), "{output}");
+        assert!(
+            output.contains("continue") || output.contains("if not skip then"),
+            "{output}"
+        );
+        assert!(output.contains("process()"), "{output}");
+        assert!(output.contains("done()"), "{output}");
+    }
 }

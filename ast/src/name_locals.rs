@@ -11,18 +11,12 @@ struct Namer {
 
 impl Namer {
     fn name_local(&mut self, prefix: &str, local: &RcLocal) {
-        let mut lock = local.0 .0.lock();
+        let mut lock = local.0.0.lock();
         if self.rename || lock.0.is_none() {
             // TODO: hacky and slow
-            if Arc::count(&local.0 .0) == 1 {
+            if Arc::count(&local.0.0) == 1 {
                 lock.0 = Some("_".to_string());
             } else {
-                let prefix = prefix.to_string()
-                    + if self.upvalues.contains(local) {
-                        "_u_"
-                    } else {
-                        ""
-                    };
                 lock.0 = Some(format!("{}{}", prefix, self.counter));
                 self.counter += 1;
             }
@@ -45,7 +39,9 @@ impl Namer {
             match statement {
                 Statement::Assign(assign) if assign.prefix => {
                     for lvalue in &assign.left {
-                        self.name_local("v", lvalue.as_local().unwrap());
+                        if let Some(local) = lvalue.as_local() {
+                            self.name_local("v", local);
+                        }
                     }
                 }
                 Statement::If(r#if) => {
@@ -124,4 +120,24 @@ pub fn name_locals(block: &mut Block, rename: bool) {
     };
     namer.find_upvalues(block);
     namer.name_locals(block);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Local;
+
+    #[test]
+    fn captured_fallback_names_do_not_leak_upvalue_markers() {
+        let local = RcLocal::new(Local::new(None));
+        let mut namer = Namer {
+            rename: false,
+            counter: 1,
+            upvalues: FxHashSet::from_iter([local.clone()]),
+        };
+
+        namer.name_local("v", &local);
+
+        assert_eq!(local.0.0.lock().0.as_deref(), Some("v1"));
+    }
 }

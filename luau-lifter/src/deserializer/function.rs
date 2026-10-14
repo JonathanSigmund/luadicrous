@@ -1,9 +1,6 @@
-use core::num;
-
 use nom::{
-    complete::take,
-    number::complete::{le_u32, le_u8},
     IResult,
+    number::complete::{le_u8, le_u32},
 };
 use nom_leb128::leb128_usize;
 
@@ -14,6 +11,7 @@ use super::{
 
 use crate::{instruction::*, op_code::OpCode};
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Function {
     pub max_stack_size: u8,
@@ -116,7 +114,7 @@ impl Function {
         let (input, num_upvalues) = le_u8(input)?;
         let (input, is_vararg) = le_u8(input)?;
 
-        let (input, flags) = le_u8(input)?;
+        let (input, _flags) = le_u8(input)?;
         let (input, _) = parse_list(input, le_u8)?;
 
         let (input, u32_instructions) = parse_list(input, le_u32)?;
@@ -156,7 +154,6 @@ impl Function {
         let input = match le_u8(input)? {
             (input, 0) => input,
             (input, _) => {
-                panic!("we have debug info");
                 let (mut input, num_locvars) = leb128_usize(input)?;
                 for _ in 0..num_locvars {
                     (input, _) = leb128_usize(input)?;

@@ -2,10 +2,10 @@ use ast::{LocalRw, Reduce, SideEffects, Traverse, UnaryOperation};
 
 use itertools::Itertools;
 use petgraph::{
+    Direction,
     algo::dominators::Dominators,
     stable_graph::{EdgeIndex, NodeIndex},
     visit::{DfsPostOrder, EdgeRef},
-    Direction,
 };
 use rustc_hash::FxHashMap;
 use tuple::Map;
@@ -16,34 +16,6 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub enum PatternOperator {
-    And,
-    Or,
-}
-
-impl From<PatternOperator> for ast::BinaryOperation {
-    fn from(val: PatternOperator) -> Self {
-        match val {
-            PatternOperator::And => ast::BinaryOperation::And,
-            PatternOperator::Or => ast::BinaryOperation::Or,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ConditionalAssignmentPattern {
-    assigner: NodeIndex,
-    next: NodeIndex,
-    tested_local: ast::RcLocal,
-    assigned_local: ast::RcLocal,
-    assigned_value: ast::RValue,
-    parameter: ast::RcLocal,
-    operator: PatternOperator,
-}
-
-type ConditionalSequenceConfiguration = (bool, bool);
-
-#[derive(Debug)]
 pub struct ConditionalSequencePattern {
     first_node: NodeIndex,
     second_node: NodeIndex,
@@ -51,17 +23,6 @@ pub struct ConditionalSequencePattern {
     assign: bool,
     inverted: bool,
     final_condition: ast::RValue,
-}
-
-#[derive(Debug)]
-pub struct GenericForNextPattern {
-    body_node: NodeIndex,
-    res_locals: Vec<ast::RcLocal>,
-    // generator is not necessarily a local in Luau
-    // it is commonly something like: `generator or __get_builtin("iter")`
-    generator: ast::RValue,
-    state: ast::RcLocal,
-    internal_control: ast::RcLocal,
 }
 
 fn simplify_condition(function: &mut Function, node: NodeIndex) -> bool {
@@ -393,10 +354,10 @@ fn make_bool_conditional(
             None if !then_value.has_side_effects() => {
                 let value = match &r#if.condition {
                     ast::RValue::Binary(ast::Binary {
-                        right: box ref value,
+                        right,
                         operation: ast::BinaryOperation::And,
                         ..
-                    }) => value,
+                    }) => right.as_ref(),
                     value => value,
                 };
                 !value.has_side_effects() && *value == then_value
@@ -420,12 +381,12 @@ fn make_bool_conditional(
             let cond =
                 std::mem::replace(&mut r#if.condition, ast::Literal::Nil.into()).reduce_condition();
             if let ast::RValue::Unary(ast::Unary {
-                box value,
+                value,
                 operation: ast::UnaryOperation::Not,
             }) = cond
             {
                 std::mem::swap(&mut then_value, &mut else_value);
-                value
+                *value
             } else {
                 cond
             }
@@ -723,14 +684,12 @@ fn match_method_call(call: &ast::Call) -> Option<(&ast::RValue, &str)> {
     // TODO: make sure `a:method with space()` doesnt happen
     if !call.arguments.is_empty()
         && !call.arguments[0].has_side_effects()
-        && let Some(ast::Index {
-            box left,
-            right: box ast::RValue::Literal(ast::Literal::String(index)),
-        }) = call.value.as_index()
-        && left == &call.arguments[0]
+        && let Some(index_value) = call.value.as_index()
+        && let ast::RValue::Literal(ast::Literal::String(index)) = index_value.right.as_ref()
+        && index_value.left.as_ref() == &call.arguments[0]
     {
         if let Ok(index) = std::str::from_utf8(index) {
-            Some((left, index))
+            Some((index_value.left.as_ref(), index))
         } else {
             None
         }

@@ -1,6 +1,14 @@
 target/
 .idea
 .vscode
-Cargo.lock
 flamegraph.svg
 result.lua
+*.profraw
+*.profdata
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+dist/

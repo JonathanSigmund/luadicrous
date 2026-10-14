@@ -6,9 +6,9 @@ use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use parking_lot::Mutex;
 use petgraph::{
+    Direction,
     algo::dominators::simple_fast,
     prelude::{DiGraph, NodeIndex},
-    Direction,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;

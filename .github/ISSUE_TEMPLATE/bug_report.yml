@@ -1,0 +1,29 @@
+name: Decompiler bug
+description: Report a minimal parsing, recovery, or behavior regression.
+body:
+  - type: input
+    id: revision
+    attributes:
+      label: Revision and platform
+      placeholder: Commit or tag, operating system, Rust version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Prefer authored source plus compiler settings. Include the command, bytecode version, and encoding. Do not upload private scripts or tokens.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: State whether this is a parsing error, syntax error, or observed runtime mismatch.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Include inspect output or errors, with personal paths and sensitive values removed.

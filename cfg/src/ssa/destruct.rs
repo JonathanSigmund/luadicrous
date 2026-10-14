@@ -4,11 +4,11 @@ use ast::{LocalRw, RcLocal};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use petgraph::{
+    Direction,
     algo::dominators::simple_fast,
     prelude::DiGraphMap,
     stable_graph::NodeIndex,
     visit::{Dfs, DfsPostOrder, EdgeRef},
-    Direction,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -111,6 +111,7 @@ impl<'a> Destructor<'a> {
         self.sequentialize();
     }
 
+    #[allow(dead_code)]
     fn add_liveness_comments(&mut self) {
         for node in self.function.graph().node_indices().collect::<Vec<_>>() {
             let liveness = &self.liveness[&node];
@@ -279,10 +280,12 @@ impl<'a> Destructor<'a> {
         while let Some(node) = dominator_dfs.next(self.function.graph()) {
             if node == self.function.entry().unwrap() {
                 assert!(dominator_index == 0);
-                assert!(!self
-                    .function
-                    .edges_to_block(node)
-                    .any(|(_, e)| !e.arguments.is_empty()));
+                assert!(
+                    !self
+                        .function
+                        .edges_to_block(node)
+                        .any(|(_, e)| !e.arguments.is_empty())
+                );
                 for (i, local) in self
                     .upvalues_in
                     .iter()
@@ -507,7 +510,6 @@ impl<'a> Destructor<'a> {
 
             let con_class_z = self.get_congruence_class(local_c.clone()).clone();
             if con_class_x == con_class_z && con_class_x != con_class_y {
-                println!("WOAH COPY SHARING");
                 return true;
             }
             if con_class_y != con_class_x
@@ -515,7 +517,6 @@ impl<'a> Destructor<'a> {
                 && con_class_x != con_class_z
                 && self.try_coalesce_copy_by_value(local_a.clone(), local_c)
             {
-                println!("WOAH COPY SHARING");
                 return true;
             }
         }

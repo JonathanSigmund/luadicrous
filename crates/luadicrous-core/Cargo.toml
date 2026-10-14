@@ -1,0 +1,21 @@
+[package]
+name = "luadicrous-core"
+description = "Validation and pipeline policy for Luadicrous RS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+luadicrous-bytecode = { path = "../luadicrous-bytecode" }
+luadicrous-ir = { path = "../luadicrous-ir" }
+lua51-lifter = { path = "../../lua51-lifter" }
+lua51-deserializer = { path = "../../lua51-deserializer" }
+luau-lifter = { path = "../../luau-lifter" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

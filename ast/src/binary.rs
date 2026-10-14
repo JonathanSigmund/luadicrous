@@ -94,7 +94,7 @@ impl SideEffects for Binary {
     }
 }
 
-impl<'a: 'b, 'b> Reduce for Binary {
+impl Reduce for Binary {
     fn reduce(self) -> RValue {
         // TODO: true == true, true == false, etc.
         // really anything without side effects should be true if l == r
@@ -153,26 +153,33 @@ impl<'a: 'b, 'b> Reduce for Binary {
             }
             (
                 RValue::Binary(Binary {
-                    left:
-                        box value @ RValue::Unary(Unary {
-                            operation: UnaryOperation::Not,
-                            ..
-                        }),
-                    right: box RValue::Literal(Literal::Boolean(true)),
+                    left,
+                    right,
                     operation: BinaryOperation::And,
                 }),
                 RValue::Literal(Literal::Boolean(false)),
                 BinaryOperation::Or,
-            ) => value,
-            (left, right, BinaryOperation::Or) if left == right => left,
+            ) if matches!(
+                left.as_ref(),
+                RValue::Unary(Unary {
+                    operation: UnaryOperation::Not,
+                    ..
+                })
+            ) && matches!(right.as_ref(), RValue::Literal(Literal::Boolean(true))) =>
+            {
+                *left
+            }
+            (left, right, BinaryOperation::Or)
+                if !left.has_side_effects() && !right.has_side_effects() && left == right =>
+            {
+                left
+            }
             // TODO: concat numbers
             (
                 RValue::Literal(Literal::String(left)),
                 RValue::Literal(Literal::String(right)),
                 BinaryOperation::Concat,
-            ) => RValue::Literal(Literal::String(
-                left.into_iter().chain(right.into_iter()).collect(),
-            )),
+            ) => RValue::Literal(Literal::String(left.into_iter().chain(right).collect())),
             (left, right, operation) => Self {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -237,25 +244,30 @@ impl<'a: 'b, 'b> Reduce for Binary {
                 BinaryOperation::Or => right.reduce(),
                 _ => unreachable!(),
             },
-            (
-                left,
-                RValue::Literal(Literal::Boolean(right)),
-                BinaryOperation::And | BinaryOperation::Or,
-            ) => match self.operation {
-                BinaryOperation::And if !right => RValue::Literal(Literal::Boolean(false)),
-                BinaryOperation::And => left.reduce(),
-                BinaryOperation::Or if right => RValue::Literal(Literal::Boolean(true)),
-                BinaryOperation::Or => left.reduce(),
-                _ => unreachable!(),
-            },
+            (left, RValue::Literal(Literal::Boolean(right)), BinaryOperation::And)
+                if right || !left.has_side_effects() =>
+            {
+                if right {
+                    left.reduce()
+                } else {
+                    RValue::Literal(Literal::Boolean(false))
+                }
+            }
+            (left, RValue::Literal(Literal::Boolean(right)), BinaryOperation::Or)
+                if !right || !left.has_side_effects() =>
+            {
+                if right {
+                    RValue::Literal(Literal::Boolean(true))
+                } else {
+                    left.reduce()
+                }
+            }
             // TODO: concat numbers
             (
                 RValue::Literal(Literal::String(left)),
                 RValue::Literal(Literal::String(right)),
                 BinaryOperation::Concat,
-            ) => RValue::Literal(Literal::String(
-                left.into_iter().chain(right.into_iter()).collect(),
-            )),
+            ) => RValue::Literal(Literal::String(left.into_iter().chain(right).collect())),
             (left, right, operation) => Self {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -263,6 +275,41 @@ impl<'a: 'b, 'b> Reduce for Binary {
             }
             .into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Binary, BinaryOperation, Global, Literal, RValue, Reduce};
+
+    fn effectful_call() -> RValue {
+        crate::Call::new(Global::from("touch").into(), Vec::new()).into()
+    }
+
+    #[test]
+    fn repeated_effectful_or_operand_is_not_collapsed() {
+        let call = effectful_call();
+        let reduced = Binary::new(call.clone(), call, BinaryOperation::Or).reduce();
+        assert!(matches!(reduced, RValue::Binary(_)));
+    }
+
+    #[test]
+    fn constant_rhs_does_not_drop_effectful_left_operand() {
+        let and_reduced = Binary::new(
+            effectful_call(),
+            Literal::Boolean(false).into(),
+            BinaryOperation::And,
+        )
+        .reduce_condition();
+        let or_reduced = Binary::new(
+            effectful_call(),
+            Literal::Boolean(true).into(),
+            BinaryOperation::Or,
+        )
+        .reduce_condition();
+
+        assert!(matches!(and_reduced, RValue::Binary(_)));
+        assert!(matches!(or_reduced, RValue::Binary(_)));
     }
 }
 
@@ -318,7 +365,7 @@ impl LocalRw for Binary {
         self.left
             .values_read()
             .into_iter()
-            .chain(self.right.values_read().into_iter())
+            .chain(self.right.values_read())
             .collect()
     }
 
@@ -326,7 +373,7 @@ impl LocalRw for Binary {
         self.left
             .values_read_mut()
             .into_iter()
-            .chain(self.right.values_read_mut().into_iter())
+            .chain(self.right.values_read_mut())
             .collect()
     }
 }

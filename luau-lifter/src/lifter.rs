@@ -27,7 +27,7 @@ pub struct Lifter<'a> {
     string_table: &'a Vec<Vec<u8>>,
     blocks: FxHashMap<usize, NodeIndex>,
     function: Function,
-    child_functions: FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, usize>,
+    child_functions: Vec<(ByAddress<Arc<Mutex<ast::Function>>>, usize)>,
     register_map: FxHashMap<usize, ast::RcLocal>,
     constant_map: FxHashMap<usize, ast::Literal>,
     current_node: Option<NodeIndex>,
@@ -42,14 +42,14 @@ impl<'a> Lifter<'a> {
     ) -> (
         Function,
         Vec<ast::RcLocal>,
-        FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, usize>,
+        Vec<(ByAddress<Arc<Mutex<ast::Function>>>, usize)>,
     ) {
         let mut context = Self {
             function_list: f_list,
             string_table: str_list,
             blocks: FxHashMap::default(),
             function: Function::new(function_id),
-            child_functions: FxHashMap::default(),
+            child_functions: Vec::new(),
             register_map: FxHashMap::default(),
             constant_map: FxHashMap::default(),
             current_node: None,
@@ -656,48 +656,56 @@ impl<'a> Lifter<'a> {
                     OpCode::LOP_AND => statements.push(
                         ast::Assign::new(
                             vec![self.register(a as _).into()],
-                            vec![ast::Binary::new(
-                                self.register(b as _).into(),
-                                self.register(c as _).into(),
-                                ast::BinaryOperation::And,
-                            )
-                            .into()],
+                            vec![
+                                ast::Binary::new(
+                                    self.register(b as _).into(),
+                                    self.register(c as _).into(),
+                                    ast::BinaryOperation::And,
+                                )
+                                .into(),
+                            ],
                         )
                         .into(),
                     ),
                     OpCode::LOP_ANDK => statements.push(
                         ast::Assign::new(
                             vec![self.register(a as _).into()],
-                            vec![ast::Binary::new(
-                                self.register(b as _).into(),
-                                self.constant(c as _).into(),
-                                ast::BinaryOperation::And,
-                            )
-                            .into()],
+                            vec![
+                                ast::Binary::new(
+                                    self.register(b as _).into(),
+                                    self.constant(c as _).into(),
+                                    ast::BinaryOperation::And,
+                                )
+                                .into(),
+                            ],
                         )
                         .into(),
                     ),
                     OpCode::LOP_OR => statements.push(
                         ast::Assign::new(
                             vec![self.register(a as _).into()],
-                            vec![ast::Binary::new(
-                                self.register(b as _).into(),
-                                self.register(c as _).into(),
-                                ast::BinaryOperation::Or,
-                            )
-                            .into()],
+                            vec![
+                                ast::Binary::new(
+                                    self.register(b as _).into(),
+                                    self.register(c as _).into(),
+                                    ast::BinaryOperation::Or,
+                                )
+                                .into(),
+                            ],
                         )
                         .into(),
                     ),
                     OpCode::LOP_ORK => statements.push(
                         ast::Assign::new(
                             vec![self.register(a as _).into()],
-                            vec![ast::Binary::new(
-                                self.register(b as _).into(),
-                                self.constant(c as _).into(),
-                                ast::BinaryOperation::Or,
-                            )
-                            .into()],
+                            vec![
+                                ast::Binary::new(
+                                    self.register(b as _).into(),
+                                    self.constant(c as _).into(),
+                                    ast::BinaryOperation::Or,
+                                )
+                                .into(),
+                            ],
                         )
                         .into(),
                     ),
@@ -1147,7 +1155,12 @@ impl<'a> Lifter<'a> {
                         let generator = self.register(a as _);
                         let state = self.register((a + 1) as _);
                         let counter = self.register((a + 2) as _);
-                        statements.push(ast::GenericForInit::new(generator, state, counter).into());
+                        let init = if op_code == OpCode::LOP_FORGPREP {
+                            ast::GenericForInit::new_generalized(generator, state, counter)
+                        } else {
+                            ast::GenericForInit::new(generator, state, counter)
+                        };
+                        statements.push(init.into());
                         let loop_index = ((block_start + index + 1) as isize + d as isize) as usize;
                         assert!(matches!(
                             self.function_list[self.function.id].instructions[loop_index],
@@ -1168,7 +1181,7 @@ impl<'a> Lifter<'a> {
                     OpCode::LOP_FORGLOOP => {
                         let generator = self.register(a as _);
                         let state = self.register((a + 1) as _);
-                        let _counter = self.register((a + 2) as _);
+                        let counter = self.register((a + 2) as _);
                         statements.push(
                             ast::GenericForNext::new(
                                 (a as usize + 3..a as usize + 3 + (aux & 0xff) as usize)
@@ -1176,6 +1189,7 @@ impl<'a> Lifter<'a> {
                                     .collect::<Vec<_>>(),
                                 generator.into(),
                                 state,
+                                counter,
                             )
                             .into(),
                         );
@@ -1191,10 +1205,28 @@ impl<'a> Lifter<'a> {
                         ));
                     }
                     OpCode::LOP_DUPTABLE => {
+                        let entries = match self.function_list[self.function.id]
+                            .constants
+                            .get(d as usize)
+                            .unwrap()
+                        {
+                            BytecodeConstant::Table(_) => Vec::new(),
+                            BytecodeConstant::TableWithValues(entries) => entries.clone(),
+                            _ => unreachable!(),
+                        };
+                        let table = ast::Table(
+                            entries
+                                .into_iter()
+                                .filter_map(|(key, value)| value.map(|value| (key, value)))
+                                .map(|(key, value)| {
+                                    (Some(self.constant(key).into()), self.constant(value).into())
+                                })
+                                .collect(),
+                        );
                         statements.push(
                             ast::Assign::new(
                                 vec![self.register(a as _).into()],
-                                vec![ast::Table::default().into()],
+                                vec![table.into()],
                             )
                             .into(),
                         );
@@ -1250,16 +1282,18 @@ impl<'a> Lifter<'a> {
 
                         let function = Arc::<Mutex<_>>::default();
                         self.child_functions
-                            .insert(ByAddress(function.clone()), func_index);
+                            .push((ByAddress(function.clone()), func_index));
                         function.lock().name = func_name;
                         statements.push(
                             ast::Assign::new(
                                 vec![dest_local.into()],
-                                vec![ast::Closure {
-                                    function: ByAddress(function),
-                                    upvalues: upvalues_passed,
-                                }
-                                .into()],
+                                vec![
+                                    ast::Closure {
+                                        function: ByAddress(function),
+                                        upvalues: upvalues_passed,
+                                    }
+                                    .into(),
+                                ],
                             )
                             .into(),
                         );
@@ -1277,7 +1311,6 @@ impl<'a> Lifter<'a> {
                     }
                     _ => unreachable!("{:?}", instruction),
                 },
-                _ => unimplemented!("{:?}", instruction),
             }
         }
 
@@ -1320,6 +1353,7 @@ impl<'a> Lifter<'a> {
                 ast::Literal::String(self.string_table[*v - 1].clone())
             }
             BytecodeConstant::Vector(x, y, z, _) => ast::Literal::Vector(*x, *y, *z),
+            BytecodeConstant::VectorDouble(x, y, z, w) => ast::Literal::VectorDouble(*x, *y, *z, *w),
             _ => unimplemented!(),
         };
         self.constant_map

@@ -5,7 +5,23 @@ use itertools::Itertools;
 use rustc_hash::FxHashSet;
 use tuple::Map;
 
-use crate::GraphStructurer;
+use crate::{GraphStructurer, post_dominators};
+
+fn matches_non_loop_for_successor_shape(
+    then_successors: &[NodeIndex],
+    else_successors: &[NodeIndex],
+    else_node: NodeIndex,
+    header: NodeIndex,
+    init_block: NodeIndex,
+) -> bool {
+    let Some(&then_successor) = then_successors.first() else {
+        return false;
+    };
+
+    then_successor == else_node
+        || (else_successors.len() == 1 && then_successor == else_successors[0])
+        || (then_successor == header && else_node == init_block)
+}
 use petgraph::{algo::dominators::Dominators, stable_graph::NodeIndex, visit::EdgeRef};
 
 impl GraphStructurer {
@@ -88,10 +104,13 @@ impl GraphStructurer {
                 }
 
                 let else_successors = self.function.successor_blocks(else_node).collect_vec();
-                if !(!then_successors.is_empty() && then_successors[0] == else_node)
-                    && !(else_successors.len() == 1 && then_successors[0] == else_successors[0])
-                    && !(then_successors[0] == header && else_node == init_block)
-                {
+                if !matches_non_loop_for_successor_shape(
+                    &then_successors,
+                    &else_successors,
+                    else_node,
+                    header,
+                    init_block,
+                ) {
                     return false;
                 }
 
@@ -176,11 +195,14 @@ impl GraphStructurer {
                     };
                     let header_block = self.function.block_mut(header).unwrap();
                     *header_block = if header_block.is_empty() {
-                        vec![ast::While::new(
-                            ast::Unary::new(condition, ast::UnaryOperation::Not).reduce_condition(),
-                            header_block.clone(),
-                        )
-                        .into()]
+                        vec![
+                            ast::While::new(
+                                ast::Unary::new(condition, ast::UnaryOperation::Not)
+                                    .reduce_condition(),
+                                header_block.clone(),
+                            )
+                            .into(),
+                        ]
                         .into()
                     } else {
                         vec![ast::Repeat::new(condition, header_block.clone()).into()].into()
@@ -192,11 +214,10 @@ impl GraphStructurer {
                     self.match_jump(header, Some(next));
                 } else {
                     let header_block = self.function.block_mut(header).unwrap();
-                    *header_block = vec![ast::While::new(
-                        ast::Literal::Boolean(true).into(),
-                        header_block.clone(),
-                    )
-                    .into()]
+                    *header_block = vec![
+                        ast::While::new(ast::Literal::Boolean(true).into(), header_block.clone())
+                            .into(),
+                    ]
                     .into();
                     self.function.remove_edges(header);
                     self.match_jump(header, None);
@@ -321,9 +342,11 @@ impl GraphStructurer {
             if !self.is_for_next(header)
                 && let Some(new_next) = common_post_doms.into_iter().find(|&p| {
                     self.function.has_block(p)
-                        && continues
-                            .iter()
-                            .all(|&n| post_dom.dominators(n).unwrap().contains(&p))
+                        && continues.iter().all(|&n| {
+                            post_dom
+                                .dominators(n)
+                                .is_some_and(|mut dominators| dominators.contains(&p))
+                        })
                 })
                 && new_next != next
             {
@@ -354,11 +377,25 @@ impl GraphStructurer {
                 changed = true;
             }
 
+            let updated_dominators = changed.then(|| {
+                petgraph::algo::dominators::simple_fast(
+                    self.function.graph(),
+                    self.function.entry().unwrap(),
+                )
+            });
+            let updated_post_dom = changed.then(|| post_dominators(self.function.graph_mut()));
+            let dominators = updated_dominators.as_ref().unwrap_or(dominators);
+            let post_dom = updated_post_dom.as_ref().unwrap_or(post_dom);
+
             let breaks = self
                 .function
                 .predecessor_blocks(next)
                 .filter(|&n| n != header)
-                .filter(|&n| dominators.dominators(n).unwrap().contains(&body))
+                .filter(|&n| {
+                    dominators
+                        .dominators(n)
+                        .is_some_and(|mut dominators| dominators.contains(&body))
+                })
                 .collect_vec();
             //println!("breaks: {:?}", breaks);
 
@@ -515,6 +552,41 @@ impl GraphStructurer {
                 }
             }
             changed
+        } else if let Ok(&latch) = successors.iter().exactly_one()
+            && self.function.predecessor_blocks(latch).count() == 1
+            && let Some((then_edge, else_edge)) = self.function.conditional_edges(latch)
+            && (then_edge.target() == header || else_edge.target() == header)
+        {
+            let (then_target, else_target) = self
+                .function
+                .conditional_edges(latch)
+                .unwrap()
+                .map(|edge| edge.target());
+            let exit = if then_target == header {
+                else_target
+            } else {
+                then_target
+            };
+            let mut latch_block = self.function.remove_block(latch).unwrap();
+            let Some(ast::Statement::If(if_statement)) = latch_block.pop() else {
+                return false;
+            };
+            let mut condition = if_statement.condition;
+            if then_target == header {
+                condition = ast::Unary::new(condition, ast::UnaryOperation::Not).reduce_condition();
+            }
+            let mut loop_body = std::mem::take(self.function.block_mut(header).unwrap());
+            loop_body.extend(latch_block.0);
+            self.function
+                .block_mut(header)
+                .unwrap()
+                .push(ast::Repeat::new(condition, loop_body).into());
+            self.function.set_edges(
+                header,
+                vec![(exit, BlockEdge::new(BranchType::Unconditional))],
+            );
+            self.match_jump(header, Some(exit));
+            true
         } else if let Ok(&body) = successors.iter().exactly_one()
             && self
                 .function
@@ -536,5 +608,34 @@ impl GraphStructurer {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use petgraph::stable_graph::NodeIndex;
+
+    use super::matches_non_loop_for_successor_shape;
+
+    #[test]
+    fn rejects_non_loop_for_shape_without_then_successor() {
+        assert!(!matches_non_loop_for_successor_shape(
+            &[],
+            &[],
+            NodeIndex::new(1),
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+        ));
+    }
+
+    #[test]
+    fn accepts_non_loop_for_shape_that_flows_into_else() {
+        assert!(matches_non_loop_for_successor_shape(
+            &[NodeIndex::new(1)],
+            &[],
+            NodeIndex::new(1),
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+        ));
     }
 }

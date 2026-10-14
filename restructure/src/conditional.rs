@@ -9,6 +9,102 @@ use tuple::Map;
 use crate::GraphStructurer;
 use petgraph::{algo::dominators::Dominators, stable_graph::NodeIndex};
 
+const MAX_DUPLICATED_BRANCH_STATEMENTS: usize = 48;
+const MAX_DUPLICATED_STATEMENTS_PER_FUNCTION: usize = 256;
+
+fn structured_statement_count(block: &ast::Block) -> usize {
+    block
+        .iter()
+        .map(|statement| {
+            1 + match statement {
+                ast::Statement::If(value) => {
+                    structured_statement_count(&value.then_block.lock())
+                        + structured_statement_count(&value.else_block.lock())
+                }
+                ast::Statement::While(value) => structured_statement_count(&value.block.lock()),
+                ast::Statement::Repeat(value) => structured_statement_count(&value.block.lock()),
+                ast::Statement::NumericFor(value) => {
+                    structured_statement_count(&value.block.lock())
+                }
+                ast::Statement::GenericFor(value) => {
+                    structured_statement_count(&value.block.lock())
+                }
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
+fn contains_internal_for_marker(block: &ast::Block) -> bool {
+    block.iter().any(|statement| match statement {
+        ast::Statement::NumForInit(_)
+        | ast::Statement::NumForNext(_)
+        | ast::Statement::GenericForInit(_)
+        | ast::Statement::GenericForNext(_) => true,
+        ast::Statement::If(value) => {
+            contains_internal_for_marker(&value.then_block.lock())
+                || contains_internal_for_marker(&value.else_block.lock())
+        }
+        ast::Statement::While(value) => contains_internal_for_marker(&value.block.lock()),
+        ast::Statement::Repeat(value) => contains_internal_for_marker(&value.block.lock()),
+        ast::Statement::NumericFor(value) => contains_internal_for_marker(&value.block.lock()),
+        ast::Statement::GenericFor(value) => contains_internal_for_marker(&value.block.lock()),
+        _ => false,
+    })
+}
+
+fn deep_clone_block(block: &ast::Block) -> ast::Block {
+    ast::Block(block.iter().map(deep_clone_statement).collect())
+}
+
+fn deep_clone_statement(statement: &ast::Statement) -> ast::Statement {
+    let mut cloned = statement.clone();
+    match &mut cloned {
+        ast::Statement::If(value) => {
+            let then_block = {
+                let block = value.then_block.lock();
+                deep_clone_block(&block)
+            };
+            let else_block = {
+                let block = value.else_block.lock();
+                deep_clone_block(&block)
+            };
+            value.then_block = Arc::new(Mutex::new(then_block));
+            value.else_block = Arc::new(Mutex::new(else_block));
+        }
+        ast::Statement::While(value) => {
+            let block = {
+                let block = value.block.lock();
+                deep_clone_block(&block)
+            };
+            value.block = Arc::new(Mutex::new(block));
+        }
+        ast::Statement::Repeat(value) => {
+            let block = {
+                let block = value.block.lock();
+                deep_clone_block(&block)
+            };
+            value.block = Arc::new(Mutex::new(block));
+        }
+        ast::Statement::NumericFor(value) => {
+            let block = {
+                let block = value.block.lock();
+                deep_clone_block(&block)
+            };
+            value.block = Arc::new(Mutex::new(block));
+        }
+        ast::Statement::GenericFor(value) => {
+            let block = {
+                let block = value.block.lock();
+                deep_clone_block(&block)
+            };
+            value.block = Arc::new(Mutex::new(block));
+        }
+        _ => {}
+    }
+    cloned
+}
+
 impl GraphStructurer {
     fn simplify_if(if_stat: &mut ast::If) {
         if let Some(unary) = if_stat.condition.as_unary() {
@@ -63,6 +159,56 @@ impl GraphStructurer {
         } else {
             None
         }
+    }
+
+    pub(crate) fn try_collapse_terminal_conditional(&mut self, entry: NodeIndex) -> bool {
+        if self
+            .function
+            .block(entry)
+            .and_then(|block| block.last())
+            .and_then(ast::Statement::as_if)
+            .is_none()
+        {
+            return false;
+        }
+        let Some((then_edge, else_edge)) = self.function.conditional_edges(entry) else {
+            return false;
+        };
+        let then_node = then_edge.target();
+        let else_node = else_edge.target();
+        let is_terminal = |node| {
+            self.function.successor_blocks(node).next().is_none()
+                && self.function.predecessor_blocks(node).count() == 1
+                && self
+                    .function
+                    .block(node)
+                    .and_then(|block| block.last())
+                    .is_some_and(|statement| matches!(statement, ast::Statement::Return(_)))
+        };
+        let (terminal, continuation, terminal_is_then) =
+            match (is_terminal(then_node), is_terminal(else_node)) {
+                (true, false) => (then_node, else_node, true),
+                (false, true) => (else_node, then_node, false),
+                _ => return false,
+            };
+
+        let terminal_block = self.function.remove_block(terminal).unwrap();
+        let block = self.function.block_mut(entry).unwrap();
+        let Some(if_statement) = block.last_mut().and_then(ast::Statement::as_if_mut) else {
+            return false;
+        };
+        if terminal_is_then {
+            if_statement.then_block = Arc::new(Mutex::new(terminal_block));
+        } else {
+            if_statement.else_block = Arc::new(Mutex::new(terminal_block));
+        }
+        Self::simplify_if(if_statement);
+        self.function.set_edges(
+            entry,
+            vec![(continuation, BlockEdge::new(BranchType::Unconditional))],
+        );
+        self.match_jump(entry, Some(continuation));
+        true
     }
 
     // a -> b -> d + a -> c -> d
@@ -138,14 +284,47 @@ impl GraphStructurer {
             return false;
         }
 
-        if self.function.predecessor_blocks(then_node).count() != 1
-            || self.function.predecessor_blocks(else_node).count() != 1
+        let then_shared = self.function.predecessor_blocks(then_node).count() != 1;
+        let else_shared = self.function.predecessor_blocks(else_node).count() != 1;
+        if (then_shared
+            && (then_node == entry
+                || self.is_loop_header(then_node)
+                || self.is_for_next(then_node)
+                || contains_internal_for_marker(self.function.block(then_node).unwrap())))
+            || (else_shared
+                && (else_node == entry
+                    || self.is_loop_header(else_node)
+                    || self.is_for_next(else_node)
+                    || contains_internal_for_marker(self.function.block(else_node).unwrap())))
         {
             return false;
         }
 
-        let then_block = self.function.remove_block(then_node).unwrap();
-        let else_block = self.function.remove_block(else_node).unwrap();
+        let then_duplicate_cost = then_shared
+            .then(|| structured_statement_count(self.function.block(then_node).unwrap()))
+            .unwrap_or(0);
+        let else_duplicate_cost = else_shared
+            .then(|| structured_statement_count(self.function.block(else_node).unwrap()))
+            .unwrap_or(0);
+        let duplicate_cost = then_duplicate_cost + else_duplicate_cost;
+        if then_duplicate_cost > MAX_DUPLICATED_BRANCH_STATEMENTS
+            || else_duplicate_cost > MAX_DUPLICATED_BRANCH_STATEMENTS
+            || self.duplicated_statements + duplicate_cost > MAX_DUPLICATED_STATEMENTS_PER_FUNCTION
+        {
+            return false;
+        }
+        self.duplicated_statements += duplicate_cost;
+
+        let then_block = if then_shared {
+            deep_clone_block(self.function.block(then_node).unwrap())
+        } else {
+            self.function.remove_block(then_node).unwrap()
+        };
+        let else_block = if else_shared {
+            deep_clone_block(self.function.block(else_node).unwrap())
+        } else {
+            self.function.remove_block(else_node).unwrap()
+        };
 
         let block = self.function.block_mut(entry).unwrap();
         // TODO: STYLE: rename to r#if?
@@ -195,15 +374,36 @@ impl GraphStructurer {
                 return false;
             }
 
-            if self.function.predecessor_blocks(then_node).count() != 1 {
+            let then_shared = self.function.predecessor_blocks(then_node).count() != 1;
+            if then_shared
+                && (then_node == entry
+                    || self.is_loop_header(then_node)
+                    || self.is_for_next(then_node)
+                    || contains_internal_for_marker(self.function.block(then_node).unwrap()))
+            {
                 return false;
             }
+
+            let duplicate_cost = then_shared
+                .then(|| structured_statement_count(self.function.block(then_node).unwrap()))
+                .unwrap_or(0);
+            if duplicate_cost > MAX_DUPLICATED_BRANCH_STATEMENTS
+                || self.duplicated_statements + duplicate_cost
+                    > MAX_DUPLICATED_STATEMENTS_PER_FUNCTION
+            {
+                return false;
+            }
+            self.duplicated_statements += duplicate_cost;
 
             if !then_successors.is_empty() && then_successors[0] != else_node {
                 return false;
             }
 
-            let then_block = self.function.remove_block(then_node).unwrap();
+            let then_block = if then_shared {
+                deep_clone_block(self.function.block(then_node).unwrap())
+            } else {
+                self.function.remove_block(then_node).unwrap()
+            };
 
             let block = self.function.block_mut(entry).unwrap();
             let if_stat = block.last_mut().unwrap().as_if_mut().unwrap();
@@ -295,16 +495,21 @@ impl GraphStructurer {
 
         let mut changed = false;
         let header_successors = self.function.successor_blocks(header).collect_vec();
+        let is_for_body_entry = self.is_for_next(header) && header_successors.contains(&entry);
         let block = self.function.block_mut(entry).unwrap();
         if let Some(if_stat) = block.last_mut().unwrap().as_if_mut() {
-            if then_node == header && !header_successors.contains(&entry) && then_main_cont {
+            if then_node == header
+                && ((!header_successors.contains(&entry) && then_main_cont) || is_for_body_entry)
+            {
                 if_stat.then_block = Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
                 changed = true;
             } else if Some(then_node) == next {
                 if_stat.then_block = Arc::new(Mutex::new(vec![ast::Break {}.into()].into()));
                 changed = true;
             }
-            if else_node == header && !header_successors.contains(&entry) && else_main_cont {
+            if else_node == header
+                && ((!header_successors.contains(&entry) && else_main_cont) || is_for_body_entry)
+            {
                 if_stat.else_block = Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
                 changed = true;
             } else if Some(else_node) == next {
@@ -343,6 +548,15 @@ impl GraphStructurer {
         then_node: NodeIndex,
         else_node: NodeIndex,
     ) -> bool {
+        let is_canonical_loop_latch = self.function.predecessor_blocks(entry).any(|header| {
+            self.is_loop_header(header)
+                && self.function.successor_blocks(header).exactly_one().ok() == Some(entry)
+                && (then_node == header || else_node == header)
+        });
+        if is_canonical_loop_latch {
+            return false;
+        }
+
         let block = self.function.block_mut(entry).unwrap();
         if block.last_mut().unwrap().as_if_mut().is_none() {
             // for loops

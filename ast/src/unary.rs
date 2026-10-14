@@ -85,11 +85,11 @@ impl Reduce for Unary {
             }
             (
                 RValue::Unary(Unary {
-                    box value,
+                    value,
                     operation: UnaryOperation::Not,
                 }),
                 UnaryOperation::Not,
-            ) => ensure_boolean(value.reduce_condition()),
+            ) => ensure_boolean((*value).reduce_condition()),
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
                 RValue::Literal(Literal::Number(-value))
             }
@@ -97,58 +97,6 @@ impl Reduce for Unary {
                 // TODO: is this accurate w/ unicode in Luau?
                 RValue::Literal(Literal::Number(value.len() as f64))
             }
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::GreaterThan,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThanOrEqual,
-            }
-            .reduce(),
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::LessThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThan,
-            }
-            .reduce(),
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::GreaterThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThan,
-            }
-            .reduce(),
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::LessThan,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThanOrEqual,
-            }
-            .reduce(),
             (
                 RValue::Binary(Binary {
                     left,
@@ -235,68 +183,14 @@ impl Reduce for Unary {
             }
             (
                 RValue::Unary(Unary {
-                    box value,
+                    value,
                     operation: UnaryOperation::Not,
                 }),
                 UnaryOperation::Not,
-            ) => value.reduce_condition(),
+            ) => (*value).reduce_condition(),
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
                 RValue::Literal(Literal::Number(-value))
             }
-            // __len has to return number, numbers are always truthy
-            (_, UnaryOperation::Length) => RValue::Literal(Literal::Boolean(true)),
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::GreaterThan,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThanOrEqual,
-            }
-            .reduce_condition(),
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::LessThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThan,
-            }
-            .reduce_condition(),
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::GreaterThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThan,
-            }
-            .reduce_condition(),
-            (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::LessThan,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThanOrEqual,
-            }
-            .reduce_condition(),
             (
                 RValue::Binary(Binary {
                     left,
@@ -369,6 +263,46 @@ impl Reduce for Unary {
             }
             .into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        Binary, BinaryOperation, Literal, Local, RValue, RcLocal, Reduce, Unary, UnaryOperation,
+    };
+
+    #[test]
+    fn negated_relational_comparison_is_not_inverted() {
+        let comparison: RValue = Binary::new(
+            Literal::Number(f64::NAN).into(),
+            Literal::Number(0.0).into(),
+            BinaryOperation::GreaterThan,
+        )
+        .into();
+        let reduced = Unary::new(comparison, UnaryOperation::Not).reduce_condition();
+
+        assert!(matches!(
+            reduced,
+            RValue::Unary(Unary {
+                operation: UnaryOperation::Not,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn length_condition_keeps_the_length_operation() {
+        let local = RcLocal::new(Local::new(None));
+        let reduced = Unary::new(local.into(), UnaryOperation::Length).reduce_condition();
+
+        assert!(matches!(
+            reduced,
+            RValue::Unary(Unary {
+                operation: UnaryOperation::Length,
+                ..
+            })
+        ));
     }
 }
 

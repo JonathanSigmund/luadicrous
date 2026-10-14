@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: ["1.85", stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - run: cargo test --release --workspace --locked
+      - run: cargo build --release --locked -p luadicrous-cli -p luadicrous-server
+
+  semantic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the release CLI
+        run: cargo build --release --locked -p luadicrous-cli
+      - name: Build the reference Luau tools
+        run: |
+          git clone --depth 1 --branch 0.739 https://github.com/luau-lang/luau.git "$RUNNER_TEMP/luau"
+          cmake -S "$RUNNER_TEMP/luau" -B "$RUNNER_TEMP/luau-build" -DCMAKE_BUILD_TYPE=Release -DLUAU_BUILD_TESTS=OFF -DLUAU_BUILD_WEB=OFF
+          cmake --build "$RUNNER_TEMP/luau-build" --target Luau.Compile.CLI Luau.Repl.CLI --parallel 2
+      - name: Compare original and recovered behavior
+        run: python3 tools/semantic_roundtrip.py --luau "$RUNNER_TEMP/luau-build/luau" --luau-compile "$RUNNER_TEMP/luau-build/luau-compile"

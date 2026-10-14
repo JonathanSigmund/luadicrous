@@ -3,8 +3,8 @@ use enum_as_inner::EnumAsInner;
 use std::fmt;
 
 use crate::{
-    formatter::Formatter, type_system::Infer, LocalRw, Reduce, SideEffects, Traverse, Type,
-    TypeSystem,
+    LocalRw, Reduce, SideEffects, Traverse, Type, TypeSystem, formatter::Formatter,
+    type_system::Infer,
 };
 
 #[derive(Debug, From, Clone, PartialEq, PartialOrd, EnumAsInner)]
@@ -14,6 +14,7 @@ pub enum Literal {
     Number(f64),
     String(Vec<u8>),
     Vector(f32, f32, f32),
+    VectorDouble(f64, f64, f64, f64),
 }
 
 impl Reduce for Literal {
@@ -27,7 +28,8 @@ impl Reduce for Literal {
             Literal::Boolean(true)
             | Literal::Number(_)
             | Literal::String(_)
-            | Literal::Vector(..) => true,
+            | Literal::Vector(..)
+            | Literal::VectorDouble(..) => true,
         })
         .into()
     }
@@ -41,6 +43,7 @@ impl Infer for Literal {
             Literal::Number(_) => Type::Number,
             Literal::String(_) => Type::String,
             Literal::Vector(..) => Type::Vector,
+            Literal::VectorDouble(..) => Type::Vector,
         }
     }
 }
@@ -79,6 +82,24 @@ impl fmt::Display for Literal {
                 )
             }
             Literal::Vector(x, y, z) => write!(f, "Vector3.new({}, {}, {})", x, y, z),
+            Literal::VectorDouble(x, y, z, w) => {
+                write!(f, "vector.create(")?;
+                let components = [*x, *y, *z, *w];
+                let count = if w.to_bits() == 0 { 3 } else { 4 };
+                for (index, component) in components[..count].iter().enumerate() {
+                    if index != 0 {
+                        write!(f, ", ")?;
+                    }
+                    if component.is_nan() {
+                        write!(f, "(0/0)")?;
+                    } else if component.is_infinite() {
+                        write!(f, "{}math.huge", if component.is_sign_negative() { "-" } else { "" })?;
+                    } else {
+                        write!(f, "{}", Literal::Number(*component))?;
+                    }
+                }
+                write!(f, ")")
+            }
         }
     }
 }

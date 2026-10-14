@@ -1,5 +1,5 @@
 use crate::{
-    has_side_effects, Assign, Block, LValue, LocalRw, RValue, RcLocal, SideEffects, Traverse,
+    Assign, Block, LValue, LocalRw, RValue, RcLocal, SideEffects, Traverse, has_side_effects,
 };
 use itertools::Itertools;
 use parking_lot::Mutex;
@@ -50,7 +50,7 @@ impl LocalRw for NumForInit {
             .values_read()
             .into_iter()
             .chain(self.limit.1.values_read())
-            .chain(self.step.1.values_read().into_iter())
+            .chain(self.step.1.values_read())
             .collect()
     }
 
@@ -60,7 +60,7 @@ impl LocalRw for NumForInit {
             .values_read_mut()
             .into_iter()
             .chain(self.limit.1.values_read_mut())
-            .chain(self.step.1.values_read_mut().into_iter())
+            .chain(self.step.1.values_read_mut())
             .collect()
     }
 
@@ -70,7 +70,7 @@ impl LocalRw for NumForInit {
             .values_written()
             .into_iter()
             .chain(self.limit.0.values_written())
-            .chain(self.step.0.values_written().into_iter())
+            .chain(self.step.0.values_written())
             .collect()
     }
 
@@ -80,7 +80,7 @@ impl LocalRw for NumForInit {
             .values_written_mut()
             .into_iter()
             .chain(self.limit.0.values_written_mut())
-            .chain(self.step.0.values_written_mut().into_iter())
+            .chain(self.step.0.values_written_mut())
             .collect()
     }
 }
@@ -138,7 +138,7 @@ impl LocalRw for NumForNext {
             .1
             .values_read()
             .into_iter()
-            .chain(self.step.values_read().into_iter())
+            .chain(self.step.values_read())
             .chain(self.limit.values_read())
             .collect()
     }
@@ -148,7 +148,7 @@ impl LocalRw for NumForNext {
             .1
             .values_read_mut()
             .into_iter()
-            .chain(self.step.values_read_mut().into_iter())
+            .chain(self.step.values_read_mut())
             .chain(self.limit.values_read_mut())
             .collect()
     }
@@ -267,18 +267,27 @@ impl fmt::Display for NumericFor {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct GenericForInit(pub Assign);
+pub struct GenericForInit(pub Assign, pub bool);
 
 impl GenericForInit {
     pub fn new(generator: RcLocal, state: RcLocal, initial_control: RcLocal) -> Self {
-        Self(Assign::new(
-            vec![
-                generator.clone().into(),
-                state.clone().into(),
-                initial_control.clone().into(),
-            ],
-            vec![generator.into(), state.into(), initial_control.into()],
-        ))
+        Self(
+            Assign::new(
+                vec![
+                    generator.clone().into(),
+                    state.clone().into(),
+                    initial_control.clone().into(),
+                ],
+                vec![generator.into(), state.into(), initial_control.into()],
+            ),
+            false,
+        )
+    }
+
+    pub fn new_generalized(generator: RcLocal, state: RcLocal, initial_control: RcLocal) -> Self {
+        let mut init = Self::new(generator, state, initial_control);
+        init.1 = true;
+        init
     }
 }
 
@@ -339,15 +348,22 @@ pub struct GenericForNext {
     pub res_locals: Vec<LValue>,
     pub generator: RValue,
     pub state: RValue,
+    pub control: RcLocal,
 }
 
 impl GenericForNext {
-    pub fn new(res_locals: Vec<RcLocal>, generator: RValue, state: RcLocal) -> Self {
+    pub fn new(
+        res_locals: Vec<RcLocal>,
+        generator: RValue,
+        state: RcLocal,
+        control: RcLocal,
+    ) -> Self {
         assert!(!res_locals.is_empty());
         Self {
             res_locals: res_locals.into_iter().map(LValue::Local).collect(),
             generator,
             state: RValue::Local(state),
+            control,
         }
     }
 }
@@ -374,7 +390,8 @@ impl LocalRw for GenericForNext {
         self.generator
             .values_read()
             .into_iter()
-            .chain(self.state.values_read().into_iter())
+            .chain(self.state.values_read())
+            .chain(std::iter::once(&self.control))
             .collect()
     }
 
@@ -382,7 +399,8 @@ impl LocalRw for GenericForNext {
         self.generator
             .values_read_mut()
             .into_iter()
-            .chain(self.state.values_read_mut().into_iter())
+            .chain(self.state.values_read_mut())
+            .chain(std::iter::once(&mut self.control))
             .collect()
     }
 
@@ -390,6 +408,7 @@ impl LocalRw for GenericForNext {
         self.res_locals
             .iter()
             .flat_map(|l| l.values_written())
+            .chain(std::iter::once(&self.control))
             .collect()
     }
 
@@ -397,6 +416,7 @@ impl LocalRw for GenericForNext {
         self.res_locals
             .iter_mut()
             .flat_map(|l| l.values_written_mut())
+            .chain(std::iter::once(&mut self.control))
             .collect()
     }
 }
@@ -405,11 +425,13 @@ impl fmt::Display for GenericForNext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "-- GenericForNext\n{} = {}({}, [internal control])\nif {} ~= nil\n[internal control] = {}\n-- end GenericForNext",
+            "-- GenericForNext\n{} = {}({}, {})\nif {} ~= nil\n{} = {}\n-- end GenericForNext",
             self.res_locals.iter().join(", "),
             self.generator,
             self.state,
+            self.control,
             self.res_locals[0],
+            self.control,
             self.res_locals[0],
         )
     }

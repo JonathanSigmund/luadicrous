@@ -5,6 +5,62 @@ use itertools::{Either, Itertools};
 use petgraph::visit::EdgeRef;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+const MAX_INLINE_EXPRESSION_NODES: usize = 64;
+const MAX_PRESERVED_NAMED_CLOSURES: usize = 48;
+
+fn expression_node_count(value: &ast::RValue) -> usize {
+    1 + value
+        .rvalues()
+        .into_iter()
+        .map(expression_node_count)
+        .sum::<usize>()
+}
+
+fn inline_fits_expression_budget(traversible: &impl Traverse, replacement: &ast::RValue) -> bool {
+    let destination_nodes = traversible
+        .rvalues()
+        .into_iter()
+        .map(expression_node_count)
+        .sum::<usize>();
+    destination_nodes
+        .saturating_sub(1)
+        .saturating_add(expression_node_count(replacement))
+        <= MAX_INLINE_EXPRESSION_NODES
+}
+
+fn read_is_conditionally_evaluated(
+    value: &ast::RValue,
+    read: &ast::RcLocal,
+    conditional: bool,
+) -> bool {
+    if matches!(value, ast::RValue::Local(local) if local == read) {
+        return conditional;
+    }
+    if let ast::RValue::Binary(binary) = value
+        && matches!(
+            binary.operation,
+            ast::BinaryOperation::And | ast::BinaryOperation::Or
+        )
+    {
+        return read_is_conditionally_evaluated(&binary.left, read, conditional)
+            || read_is_conditionally_evaluated(&binary.right, read, true);
+    }
+    value
+        .rvalues()
+        .into_iter()
+        .any(|child| read_is_conditionally_evaluated(child, read, conditional))
+}
+
+fn traversible_conditionally_evaluates_read(
+    traversible: &impl Traverse,
+    read: &ast::RcLocal,
+) -> bool {
+    traversible
+        .rvalues()
+        .into_iter()
+        .any(|value| read_is_conditionally_evaluated(value, read, false))
+}
+
 struct TraverseSelf<'a, T: Traverse>(&'a mut T);
 
 impl<'a> Traverse for TraverseSelf<'a, ast::RValue> {
@@ -22,6 +78,7 @@ struct Inliner<'a> {
     local_to_group: &'a FxHashMap<ast::RcLocal, usize>,
     upvalue_to_group: &'a IndexMap<ast::RcLocal, ast::RcLocal>,
     local_usages: &'a mut FxHashMap<ast::RcLocal, usize>,
+    preserved_closure_locals: &'a FxHashSet<ast::RcLocal>,
 }
 
 impl<'a> Inliner<'a> {
@@ -30,66 +87,44 @@ impl<'a> Inliner<'a> {
         local_to_group: &'a FxHashMap<ast::RcLocal, usize>,
         upvalue_to_group: &'a IndexMap<ast::RcLocal, ast::RcLocal>,
         local_usages: &'a mut FxHashMap<ast::RcLocal, usize>,
+        preserved_closure_locals: &'a FxHashSet<ast::RcLocal>,
     ) -> Self {
         Self {
             function,
             local_to_group,
             upvalue_to_group,
             local_usages,
+            preserved_closure_locals,
         }
     }
 
     fn try_inline(
         traversible: &mut impl Traverse,
         read: &ast::RcLocal,
+        preserve_named_closure: bool,
         new_rvalue: &mut Option<ast::RValue>,
         new_rvalue_has_side_effects: bool,
     ) -> bool {
+        if preserve_named_closure
+            && matches!(
+            new_rvalue.as_ref(),
+            Some(ast::RValue::Closure(closure)) if closure.function.lock().name.is_some()
+        )
+        {
+            return false;
+        }
+        if !inline_fits_expression_budget(traversible, new_rvalue.as_ref().unwrap()) {
+            return false;
+        }
+        if new_rvalue_has_side_effects
+            && traversible_conditionally_evaluates_read(traversible, read)
+        {
+            return false;
+        }
         traversible
             .traverse_values(&mut |p, v| {
                 match p {
-                    ast::PreOrPost::Pre => {
-                        if let Either::Right(rvalue) = v {
-                            match rvalue {
-                                ast::RValue::Binary(ast::Binary {
-                                    left,
-                                    right,
-                                    operation,
-                                }) if operation.is_comparator()
-                                    && left.has_side_effects()
-                                    && let box ast::RValue::Local(ref local) = right
-                                    && local == read =>
-                                {
-                                    *right = std::mem::replace(
-                                        left,
-                                        Box::new(new_rvalue.take().unwrap()),
-                                    );
-                                    *operation = match *operation {
-                                        // TODO: __eq metamethod?
-                                        ast::BinaryOperation::Equal => ast::BinaryOperation::Equal,
-                                        ast::BinaryOperation::NotEqual => {
-                                            ast::BinaryOperation::NotEqual
-                                        }
-                                        ast::BinaryOperation::LessThanOrEqual => {
-                                            ast::BinaryOperation::GreaterThanOrEqual
-                                        }
-                                        ast::BinaryOperation::GreaterThanOrEqual => {
-                                            ast::BinaryOperation::LessThanOrEqual
-                                        }
-                                        ast::BinaryOperation::LessThan => {
-                                            ast::BinaryOperation::GreaterThan
-                                        }
-                                        ast::BinaryOperation::GreaterThan => {
-                                            ast::BinaryOperation::LessThan
-                                        }
-                                        _ => unreachable!(),
-                                    };
-                                    return Some(true);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
+                    ast::PreOrPost::Pre => {}
                     ast::PreOrPost::Post => {
                         if let Either::Right(rvalue) = v {
                             match rvalue {
@@ -128,7 +163,9 @@ impl<'a> Inliner<'a> {
                     stat.values_read()
                         .into_iter()
                         .filter(|&l| {
-                            self.local_usages[l] == 1 && !self.upvalue_to_group.contains_key(l)
+                            self.local_usages[l] == 1
+                                && !self.upvalue_to_group.contains_key(l)
+                                && !self.preserved_closure_locals.contains(l)
                         })
                         .cloned()
                         .map(Some)
@@ -208,6 +245,8 @@ impl<'a> Inliner<'a> {
                                 if Self::try_inline(
                                     &mut block[index],
                                     read.as_ref().unwrap(),
+                                    self.preserved_closure_locals
+                                        .contains(read.as_ref().unwrap()),
                                     &mut new_rvalue,
                                     new_rvalue_has_side_effects,
                                 ) {
@@ -247,7 +286,7 @@ impl<'a> Inliner<'a> {
                                     .iter()
                                     .rev()
                                     .map_while(|r| r.as_local())
-                                    .eq_by(assign.left.iter().rev(), |a, b| Some(a) == b.as_local())
+                                    .eq(assign.left.iter().rev().map_while(|l| l.as_local()))
                                 && assign.left.iter().all(|l| {
                                     l.as_local().is_some_and(|l| {
                                         stat_to_values_read[index]
@@ -334,7 +373,9 @@ impl<'a> Inliner<'a> {
                         a.values_read()
                             .into_iter()
                             .filter(|&l| {
-                                self.local_usages[l] == 1 && !self.upvalue_to_group.contains_key(l)
+                                self.local_usages[l] == 1
+                                    && !self.upvalue_to_group.contains_key(l)
+                                    && !self.preserved_closure_locals.contains(l)
                             })
                             .cloned()
                             .map(Some)
@@ -418,6 +459,8 @@ impl<'a> Inliner<'a> {
                                             .1,
                                     ),
                                     read.as_ref().unwrap(),
+                                    self.preserved_closure_locals
+                                        .contains(read.as_ref().unwrap()),
                                     &mut new_rvalue,
                                     new_rvalue_has_side_effects,
                                 ) {
@@ -465,6 +508,125 @@ impl<'a> Inliner<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        Inliner, MAX_INLINE_EXPRESSION_NODES, TraverseSelf, inline_fits_expression_budget,
+    };
+
+    fn addition_chain(terms: usize) -> ast::RValue {
+        (1..terms).fold(ast::Literal::Number(0.0).into(), |left, index| {
+            ast::Binary::new(
+                left,
+                ast::Literal::Number(index as f64).into(),
+                ast::BinaryOperation::Add,
+            )
+            .into()
+        })
+    }
+
+    #[test]
+    fn rejects_inlining_that_would_create_an_excessive_expression() {
+        let destination = ast::Assign::new(
+            vec![ast::RcLocal::new(ast::Local::new(None)).into()],
+            vec![addition_chain(MAX_INLINE_EXPRESSION_NODES).into()],
+        );
+
+        assert!(!inline_fits_expression_budget(
+            &destination,
+            &ast::Literal::Number(1.0).into()
+        ));
+    }
+
+    #[test]
+    fn permits_small_expression_inlining() {
+        let destination = ast::Assign::new(
+            vec![ast::RcLocal::new(ast::Local::new(None)).into()],
+            vec![addition_chain(4)],
+        );
+
+        assert!(inline_fits_expression_budget(
+            &destination,
+            &ast::Literal::Number(1.0).into()
+        ));
+    }
+
+    #[test]
+    fn preserves_comparison_operand_order_for_effectful_values() {
+        let read = ast::RcLocal::new(ast::Local::new(None));
+        let mut comparison: ast::RValue = ast::Binary::new(
+            ast::Call::new(ast::Global::from("left").into(), Vec::new()).into(),
+            read.clone().into(),
+            ast::BinaryOperation::Equal,
+        )
+        .into();
+        let replacement: ast::RValue =
+            ast::Call::new(ast::Global::from("right").into(), Vec::new()).into();
+        let mut replacement = Some(replacement);
+
+        assert!(!Inliner::try_inline(
+            &mut TraverseSelf(&mut comparison),
+            &read,
+            false,
+            &mut replacement,
+            true,
+        ));
+        assert!(replacement.is_some());
+    }
+
+    #[test]
+    fn preserves_eager_evaluation_before_short_circuit_expression() {
+        let condition = ast::RcLocal::new(ast::Local::new(None));
+        let read = ast::RcLocal::new(ast::Local::new(None));
+        let mut expression: ast::RValue = ast::Binary::new(
+            condition.into(),
+            read.clone().into(),
+            ast::BinaryOperation::And,
+        )
+        .into();
+        let replacement: ast::RValue =
+            ast::Call::new(ast::Global::from("effect").into(), Vec::new()).into();
+        let mut replacement = Some(replacement);
+
+        assert!(!Inliner::try_inline(
+            &mut TraverseSelf(&mut expression),
+            &read,
+            false,
+            &mut replacement,
+            true,
+        ));
+        assert!(replacement.is_some());
+    }
+
+    #[test]
+    fn preserves_debug_named_closures() {
+        let read = ast::RcLocal::new(ast::Local::new(None));
+        let mut destination: ast::RValue = ast::Call::new(read.clone().into(), Vec::new()).into();
+        let function = ast::Function {
+            name: Some("shootGun".to_owned()),
+            ..Default::default()
+        };
+        let mut replacement = Some(
+            ast::Closure {
+                function: by_address::ByAddress(triomphe::Arc::new(parking_lot::Mutex::new(
+                    function,
+                ))),
+                upvalues: Vec::new(),
+            }
+            .into(),
+        );
+
+        assert!(!Inliner::try_inline(
+            &mut TraverseSelf(&mut destination),
+            &read,
+            true,
+            &mut replacement,
+            false,
+        ));
+        assert!(replacement.is_some());
+    }
+}
+
 pub fn inline(
     function: &mut Function,
     local_to_group: &FxHashMap<ast::RcLocal, usize>,
@@ -477,6 +639,61 @@ pub fn inline(
         }
     }
 
+    let mut seen_named_closures = FxHashSet::default();
+    let mut named_closure_locals = function
+        .blocks()
+        .flat_map(|(_, block)| block.iter())
+        .filter_map(|statement| {
+            let assign = statement.as_assign()?;
+            if assign.left.len() != 1 || assign.right.len() != 1 {
+                return None;
+            }
+            let local = assign.left[0].as_local()?;
+            let closure = assign.right[0].as_closure()?;
+            closure
+                .function
+                .lock()
+                .name
+                .is_some()
+                .then_some(())?;
+            seen_named_closures
+                .insert(local.clone())
+                .then(|| local.clone())
+        })
+        .collect::<Vec<_>>();
+    let named_closure_count = named_closure_locals.len();
+    if named_closure_count > MAX_PRESERVED_NAMED_CLOSURES {
+        named_closure_locals.sort_by_key(|local| {
+            std::cmp::Reverse(local_usages.get(local).copied().unwrap_or_default())
+        });
+        named_closure_locals.truncate(MAX_PRESERVED_NAMED_CLOSURES);
+    }
+    let preserved_closure_locals = named_closure_locals.into_iter().collect::<FxHashSet<_>>();
+    if std::env::var_os("LUADICROUS_RS_DEBUG_LIFTER").is_some()
+        && !preserved_closure_locals.is_empty()
+    {
+        let mut names = preserved_closure_locals
+            .iter()
+            .filter_map(|local| {
+                function.blocks().find_map(|(_, block)| {
+                    block.iter().find_map(|statement| {
+                        let assign = statement.as_assign()?;
+                        (assign.left.first().and_then(ast::LValue::as_local) == Some(local))
+                            .then(|| assign.right.first()?.as_closure()?.function.lock().name.clone())
+                            .flatten()
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        eprintln!(
+            "[luadicrous-rs] preserving {}/{} named closure locals: {}",
+            preserved_closure_locals.len(),
+            named_closure_count,
+            names.join(", ")
+        );
+    }
+
     let mut changed = true;
     while changed {
         changed = false;
@@ -485,6 +702,7 @@ pub fn inline(
             local_to_group,
             upvalue_to_group,
             &mut local_usages,
+            &preserved_closure_locals,
         )
         .inline_rvalues();
 
@@ -500,6 +718,7 @@ pub fn inline(
                     let has_side_effects = rvalue.has_side_effects();
                     // TODO: REFACTOR: is_some_and
                     if !upvalue_to_group.contains_key(local)
+                        && !preserved_closure_locals.contains(local)
                         && local_usages.get(local).map_or(true, |&u| u == 0)
                     {
                         if has_side_effects {
@@ -549,10 +768,8 @@ pub fn inline(
                         && let ast::Statement::Assign(field_assign) = &block[i]
                         && field_assign.left.len() == 1
                         && field_assign.right.len() == 1
-                        && let ast::LValue::Index(ast::Index {
-                            left: box ast::RValue::Local(local),
-                            ..
-                        }) = &field_assign.left[0]
+                        && let ast::LValue::Index(index) = &field_assign.left[0]
+                        && let ast::RValue::Local(local) = index.left.as_ref()
                         && local == &object_local
                     {
                         let right = &field_assign.right[0];
@@ -570,8 +787,8 @@ pub fn inline(
                             .unwrap()
                             .0
                             .push((
-                                Some(Box::into_inner(
-                                    field_assign
+                                Some(
+                                    *field_assign
                                         .left
                                         .into_iter()
                                         .next()
@@ -579,7 +796,7 @@ pub fn inline(
                                         .into_index()
                                         .unwrap()
                                         .right,
-                                )),
+                                ),
                                 field_assign.right.into_iter().next().unwrap(),
                             ));
                         changed = true;

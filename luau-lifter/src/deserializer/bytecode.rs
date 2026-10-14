@@ -1,4 +1,4 @@
-use nom::{bytes::complete::take, number::complete::le_u8, IResult};
+use nom::{IResult, bytes::complete::take, number::complete::le_u8};
 
 use super::chunk::Chunk;
 

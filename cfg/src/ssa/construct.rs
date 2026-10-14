@@ -4,9 +4,9 @@ use ast::{LocalRw, RcLocal, Traverse};
 use indexmap::{IndexMap, IndexSet};
 use itertools::{Either, Itertools};
 use petgraph::{
+    Direction,
     stable_graph::NodeIndex,
     visit::{Dfs, EdgeRef, Walker},
-    Direction,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -277,6 +277,7 @@ impl<'a> SsaConstructor<'a> {
         param_local
     }
 
+    #[allow(dead_code)]
     fn try_remove_trivial_param(&mut self, node: NodeIndex, param_local: RcLocal) -> RcLocal {
         let mut same = None;
         let args_in = self.function.edges_to_block(node).map(|(_, e)| {
@@ -433,7 +434,9 @@ impl<'a> SsaConstructor<'a> {
     }
 
     fn mark_upvalues(&mut self) {
-        let upvalues_open = UpvaluesOpen::new(self.function, self.old_locals.clone());
+        let inherited_upvalues = self.new_upvalues_in.keys().cloned().collect();
+        let upvalues_open =
+            UpvaluesOpen::new(self.function, self.old_locals.clone(), &inherited_upvalues);
         for &node in &self.dfs {
             for stat_index in 0..self.function.block(node).unwrap().len() {
                 let statement = self.function.block(node).unwrap().get(stat_index).unwrap();
@@ -505,6 +508,9 @@ impl<'a> SsaConstructor<'a> {
         Vec<(RcLocal, FxHashSet<RcLocal>)>,
         Vec<FxHashSet<RcLocal>>,
     ) {
+        let profile_phases =
+            std::env::var_os("LUADICROUS_RS_DEBUG_TIMINGS").is_some() && self.dfs.len() >= 128;
+        let mut phase_started = std::time::Instant::now();
         let entry = self.function.entry().unwrap();
         let mut visited_nodes = Vec::with_capacity(self.function.graph().node_count());
         for i in 0..self.dfs.len() {
@@ -610,18 +616,66 @@ impl<'a> SsaConstructor<'a> {
             }
         }
         assert!(self.incomplete_params.is_empty());
+        if profile_phases {
+            eprintln!(
+                "[luadicrous-rs timing] SSA rename/seal: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
 
         // TODO: irreducible control flow (see the paper this algorithm is from)
         // TODO: apply_local_map unnecessary number of calls
+        phase_started = std::time::Instant::now();
         apply_local_map(self.function, std::mem::take(&mut self.local_map));
+        if profile_phases {
+            eprintln!(
+                "[luadicrous-rs timing] SSA initial local map: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
 
+        phase_started = std::time::Instant::now();
         self.mark_upvalues();
+        if profile_phases {
+            eprintln!(
+                "[luadicrous-rs timing] SSA mark upvalues: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
+        phase_started = std::time::Instant::now();
         self.propagate_copies();
+        if profile_phases {
+            eprintln!(
+                "[luadicrous-rs timing] SSA propagate copies: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
+        phase_started = std::time::Instant::now();
         apply_local_map(self.function, std::mem::take(&mut self.local_map));
+        if profile_phases {
+            eprintln!(
+                "[luadicrous-rs timing] SSA copy local map: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
 
         // TODO: loop until returns false?
+        phase_started = std::time::Instant::now();
         remove_unnecessary_params(self.function, &mut self.local_map);
+        if profile_phases {
+            eprintln!(
+                "[luadicrous-rs timing] SSA remove params: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
+        phase_started = std::time::Instant::now();
         apply_local_map(self.function, std::mem::take(&mut self.local_map));
+        if profile_phases {
+            eprintln!(
+                "[luadicrous-rs timing] SSA final local map: {:.3}s",
+                phase_started.elapsed().as_secs_f64()
+            );
+        }
 
         (
             self.local_count,
@@ -647,10 +701,12 @@ pub fn construct(
     // if entry has predecessors, this might risk it never being incomplete
     // resulting in broken params
     // TODO: verify ^ and insert temporary entry that's removed if there is no block params (if its an issue)
-    assert!(function
-        .predecessor_blocks(function.entry().unwrap())
-        .next()
-        .is_none());
+    assert!(
+        function
+            .predecessor_blocks(function.entry().unwrap())
+            .next()
+            .is_none()
+    );
     let mut new_upvalues_in = IndexMap::with_capacity(upvalues_in.len());
     for upvalue in upvalues_in {
         new_upvalues_in.insert(upvalue.clone(), FxHashSet::default());

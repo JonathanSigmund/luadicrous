@@ -1,0 +1,24 @@
+[Unit]
+Description=Luadicrous RS native decompiler API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/luadicrous-rs
+EnvironmentFile=-%h/luadicrous-rs/.env
+Environment=HOST=0.0.0.0
+Environment=PORT=8000
+Environment=LUADICROUS_MAX_UPLOAD_BYTES=67108864
+Environment=LUADICROUS_MAX_OUTPUT_BYTES=67108864
+Environment=LUADICROUS_ENGINE_TIMEOUT=30
+Environment=LUADICROUS_MAX_CONCURRENT=2
+ExecStart=%h/luadicrous-rs/target/release/luadicrous-server
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

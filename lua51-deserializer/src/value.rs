@@ -1,10 +1,10 @@
 use enum_as_inner::EnumAsInner;
 use nom::{
+    Err, IResult,
     bytes::complete::take,
     error::{Error, ErrorKind, ParseError},
     multi::count,
-    number::complete::{le_f64, le_u32, le_u8},
-    Err, IResult,
+    number::complete::{le_f64, le_u8, le_u32, le_u64},
 };
 
 #[derive(Debug, EnumAsInner)]
@@ -16,7 +16,7 @@ pub enum Value<'a> {
 }
 
 impl<'a> Value<'a> {
-    pub fn parse(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+    pub fn parse(input: &'a [u8], size_t_width: u8) -> IResult<&'a [u8], Self> {
         let (input, kind) = le_u8(input)?;
 
         match kind {
@@ -32,15 +32,9 @@ impl<'a> Value<'a> {
                 Ok((input, Self::Number(value)))
             }
             4 => {
-                let (input, value) = parse_string(input)?;
-
-                // TODO: lua bytecode actually allows the string to be completely empty
-                // it sets the type to string but gc to NULL
-                // this probably causes some weird behavior
-                assert!(!value.is_empty());
-
-                // exclude null terminator
-                Ok((input, Self::String(&value[..value.len() - 1])))
+                let (input, value) = parse_string(input, size_t_width)?;
+                let value = value.strip_suffix(&[0]).unwrap_or(value);
+                Ok((input, Self::String(value)))
             }
             _ => Err(Err::Failure(Error::from_error_kind(
                 input,
@@ -50,14 +44,31 @@ impl<'a> Value<'a> {
     }
 }
 
-pub fn parse_string(input: &[u8]) -> IResult<&[u8], &[u8]> {
-    let (input, string_length) = le_u32(input)?;
-    take(string_length as usize)(input)
+pub fn parse_string(input: &[u8], size_t_width: u8) -> IResult<&[u8], &[u8]> {
+    let (input, string_length) = match size_t_width {
+        4 => {
+            let (input, value) = le_u32(input)?;
+            (input, u64::from(value))
+        }
+        8 => le_u64(input)?,
+        _ => {
+            return Err(Err::Failure(Error::from_error_kind(
+                input,
+                ErrorKind::Verify,
+            )));
+        }
+    };
+    let length = usize::try_from(string_length)
+        .map_err(|_| Err::Failure(Error::from_error_kind(input, ErrorKind::TooLarge)))?;
+    take(length)(input)
 }
 
-pub fn parse_strings(input: &[u8]) -> IResult<&[u8], Vec<&[u8]>> {
+pub fn parse_strings(input: &[u8], size_t_width: u8) -> IResult<&[u8], Vec<&[u8]>> {
     let (input, string_count) = le_u32(input)?;
-    let (input, strings) = count(parse_string, string_count as usize)(input)?;
+    let (input, strings) = count(
+        |input| parse_string(input, size_t_width),
+        string_count as usize,
+    )(input)?;
 
     Ok((input, strings))
 }

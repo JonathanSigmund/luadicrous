@@ -1,4 +1,4 @@
-use nom::{bytes::complete::take, IResult};
+use nom::{IResult, bytes::complete::take};
 use nom_leb128::leb128_usize;
 
 pub mod bytecode;

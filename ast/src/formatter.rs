@@ -1,4 +1,3 @@
-use std::fmt::Write;
 use std::iter;
 use std::{
     borrow::Cow,
@@ -15,6 +14,41 @@ use crate::{
 pub enum IndentationMode {
     Spaces(u8),
     Tab,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Literal, Table};
+
+    #[test]
+    fn formats_identifier_table_keys_without_brackets() {
+        let table = Table(vec![
+            (
+                Some(Literal::from("Type").into()),
+                Literal::Number(1.0).into(),
+            ),
+            (
+                Some(Literal::from("not valid").into()),
+                Literal::Number(2.0).into(),
+            ),
+        ]);
+
+        let output = table.to_string();
+        assert!(output.contains("Type = 1"));
+        assert!(output.contains("[\"not valid\"] = 2"));
+    }
+
+    #[test]
+    fn brackets_empty_and_reserved_table_keys() {
+        let table = Table(vec![
+            (Some(Literal::from("").into()), Literal::Boolean(true).into()),
+            (Some(Literal::from("continue").into()), Literal::Boolean(false).into()),
+        ]);
+
+        let output = table.to_string();
+        assert!(output.contains("[\"\"] = true"));
+        assert!(output.contains("[\"continue\"] = false"));
+    }
 }
 
 impl IndentationMode {
@@ -227,9 +261,19 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             } else {
                 if !sequential_keys {
                     if let Some(key) = key {
-                        write!(self.output, "[")?;
-                        self.format_rvalue(key)?;
-                        write!(self.output, "] = ")?;
+                        if let RValue::Literal(Literal::String(field)) = key {
+                            if Self::is_valid_name(field) {
+                                write!(self.output, "{} = ", std::str::from_utf8(field).unwrap())?;
+                            } else {
+                                write!(self.output, "[")?;
+                                self.format_rvalue(key)?;
+                                write!(self.output, "] = ")?;
+                            }
+                        } else {
+                            write!(self.output, "[")?;
+                            self.format_rvalue(key)?;
+                            write!(self.output, "] = ")?;
+                        }
                     }
                 }
                 self.format_rvalue(value)?;
@@ -310,7 +354,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             //     self.indent()?;
             //     writeln!(self.output, "-- line defined: {}", closure.line_defined.as_ref().unwrap())?;
             // }
-            if !closure.upvalues.is_empty() {
+            if !closure.upvalues.is_empty()
+                && std::env::var_os("LUADICROUS_DEBUG_UPVALUES").is_some()
+            {
                 self.indent()?;
                 write!(self.output, "-- upvalues: ")?;
                 let mut it = closure.upvalues.iter().peekable();
@@ -411,7 +457,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         Ok(())
     }
     pub(crate) fn is_valid_name(name: &[u8]) -> bool {
-        if !(name
+        if name.is_empty() || !(name
             .iter()
             .enumerate()
             .all(|(i, &c)| (i != 0 && c.is_ascii_digit()) || c.is_ascii_alphabetic() || c == b'_'))
@@ -420,7 +466,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         }
         // TODO: Consider adding "goto" to reserved keywords
         const RESERVED_KEYWORDS: &[&str] = &[
-            "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
+            "and", "break", "continue", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
             "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
         ];
 
@@ -432,7 +478,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     // TODO: PERF: Cow like from_utf8_lossy
-    pub(crate) fn escape_string(string: &[u8]) -> Cow<str> {
+    pub(crate) fn escape_string(string: &[u8]) -> Cow<'_, str> {
         let mut owned: Option<String> = None;
         let mut iter = string.iter().enumerate().peekable();
         while let Some((i, &c)) = iter.next() {
@@ -574,19 +620,19 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         {
             let left = &assign.left[0];
             if assign.prefix || left.as_global().is_some() || {
-                if let LValue::Index(ref index) = left {
+                if let LValue::Index(index) = left {
                     let mut index = index;
                     let mut valid = true;
                     loop {
-                        if let box RValue::Literal(Literal::String(ref key)) = &index.right
+                        if let RValue::Literal(Literal::String(key)) = index.right.as_ref()
                             && Self::is_valid_name(key)
                         {
-                            match index.left {
-                                box RValue::Index(ref i) => {
+                            match index.left.as_ref() {
+                                RValue::Index(i) => {
                                     index = i;
                                     continue;
                                 }
-                                box RValue::Global(_) | box RValue::Local(_) => {}
+                                RValue::Global(_) | RValue::Local(_) => {}
                                 _ => valid = false,
                             }
                         } else {
