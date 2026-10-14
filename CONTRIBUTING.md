@@ -5,7 +5,7 @@ before changing names, whitespace, or other presentation details.
 
 ## Development
 
-Use Rust 1.85 or newer and keep `Cargo.lock` checked in. Normal builds and tests
+Use Rust 1.88 or newer and keep `Cargo.lock` checked in. Normal builds and tests
 do not require the Python reference implementation or a Roblox installation.
 
 ```sh

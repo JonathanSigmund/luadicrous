@@ -21,6 +21,7 @@ unreleased snapshot and do not imply a historical release schedule.
 
 ### Known limitations
 
+- Rust 1.88 or newer is required for the existing Rust 2024 let-chain syntax.
 - Recompilable output is not proof of equivalent behavior for arbitrary scripts.
 - Stripped original names cannot be recovered reliably.
 - `CMPPROTO` is inspectable but not safely source-liftable.

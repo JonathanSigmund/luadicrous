@@ -1,5 +1,7 @@
 # Luadicrous RS
 
+[![CI](https://github.com/JonathanSigmund/luadicrous/actions/workflows/ci.yml/badge.svg)](https://github.com/JonathanSigmund/luadicrous/actions/workflows/ci.yml)
+
 An experimental, correctness-first Lua and Luau decompiler written in stable Rust.
 
 This repository is a fork of [Medal](https://github.com/shrimp-nz/medal), but the
@@ -40,7 +42,7 @@ The current milestone provides:
 - per-function panic recovery that preserves the raw register graph;
 - bounded temporary spilling for Luau's 200-local source limit;
 - exact lowering of numeric and generic low-level loop nodes;
-- deterministic local identities and byte-identical repeated output;
+- deterministic local-variable identities; timing watermarks can vary between runs;
 - faithful decoded disassembly for runtime-dependent chunks;
 - an `inspect` CLI with human and JSON output;
 - a Python-oracle parity command.
@@ -52,8 +54,6 @@ safe, with register-faithful fallback for functions whose graph complexity would
 make SSA quadratic. Release panics unwind into that fallback instead of terminating
 the process.
 
-The v12 parser was checked against 2,733 chunks from an atmosphere support
-bundle; every chunk parsed, produced source, and recompiled with `luau-compile`.
 `CALLFB` lifts as an ordinary call while its feedback metadata remains available
 in the parsed model.
 `CMPPROTO` is decoded and disassembled, but source recovery stops rather than
@@ -73,7 +73,7 @@ cargo build --release --locked -p luadicrous-cli -p luadicrous-server
 cargo test --release --workspace --locked
 ```
 
-Rust 1.85 or newer is required. The CLI is `target/release/luadicrous-rs`;
+Rust 1.88 or newer is required. The CLI is `target/release/luadicrous-rs`;
 the HTTP server is `target/release/luadicrous-server`.
 
 ## Inspect bytecode
@@ -131,35 +131,21 @@ Server controls:
 - `LUADICROUS_MAX_CONCURRENT`
 - `LUADICROUS_CORS_ORIGINS`
 
-The static-data path handles very large generated table payloads without entering
-the CFG pipeline. For example, the 1.69 MB decoded Luraph fixture (336,646 words,
-3,479 nested tables) emits 3.3 MB of recompilable Luau in under half a second on
-the development machine.
+The static-data path reconstructs generated tables without entering the CFG
+pipeline. This repository does not currently publish a reproducible performance
+comparison against other decompilers.
 
-## Measured hard-corpus results
+## Verification
 
-Release measurements on the development machine:
+The current snapshot passed 87 Rust workspace tests in a local release build:
 
-| Fixture | Python/PyPy | Rust | Result |
-| --- | ---: | ---: | --- |
-| `joe.txt` | 0.49s | <0.01s | recompiles |
-| Janitor v9 | 0.91s | <0.01s | recompiles |
-| PG Clans | 2.57s | 0.01s | recompiles |
-| protected 288 KB client | 13.60s | 0.13s | full root recovered |
-| Counter-Blox 341 KB client | 12.75s | 0.27s | full root recovered |
-| LuauCeption 6.2 MB | — | 4.0s | 439k deterministic lines, semantic aliases, recompiles |
+```sh
+cargo test --release --workspace --locked
+```
 
-In earlier local validation, the 99-file `EverythingBytecode` corpus and ten hard canaries passed
-decompile, `luau-compile`, and artifact gates with no failures.
-
-These are local corpus measurements, not portable CI fixtures or a claim that
-arbitrary decompiled programs are behaviorally equivalent. Successful
-recompilation checks syntax, not runtime correctness. Stripped bytecode cannot
-reliably reveal original local names, and runtime-dependent proto-identity
-guards such as `CMPPROTO` remain explicitly unsupported for source recovery.
-
-The public semantic test suite compiles authored examples, decompiles them, and
-compares their observable behavior at optimization levels 0, 1, and 2:
+The public semantic harness contains 14 authored examples. It compiles them,
+decompiles them, and compares observable behavior at optimization levels 0, 1,
+and 2. All 42 comparisons passed locally with Luau 0.739:
 
 ```sh
 python3 tools/semantic_roundtrip.py
@@ -167,6 +153,12 @@ python3 tools/semantic_roundtrip.py
 
 Install `luau` and `luau-compile` first, or pass their paths with `--luau` and
 `--luau-compile`. The suite does not redistribute extracted game scripts.
+
+These checks establish the behavior of those specific test cases, not arbitrary
+input equivalence. Recompilation alone checks syntax, not runtime correctness.
+Stripped original names cannot be recovered reliably, and `CMPPROTO` guards
+remain unsupported for source recovery. CI results are reported by GitHub
+Actions separately; local results are not a claim that every hosted runner passes.
 
 Set `LUADICROUS_RS_DEBUG_LIFTER=1` to print per-prototype lift and fallback
 decisions without changing normal output.
