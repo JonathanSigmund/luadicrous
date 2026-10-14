@@ -115,6 +115,21 @@ fn lifts_fast_pcall_once_through_its_original_fallback() {
 }
 
 #[test]
+fn recovery_methods_are_not_exposed_in_source_watermarks() {
+    for bytes in [
+        vector_chunk(13, [1.0, 2.0, 3.0, 0.0], 0),
+        vector_chunk(13, [1.0, 2.0, 3.0, 0.0], 1),
+        protected_chunk(0, 2),
+    ] {
+        let decompiled = Engine::default().decompile(&bytes).unwrap();
+        assert!(decompiled.source.starts_with("-- Decompiled by Luadicrous V2\n"));
+        let source = decompiled.source.to_lowercase();
+        assert!(!source.contains("recovery strategy"));
+        assert!(!source.contains("recovery method"));
+    }
+}
+
+#[test]
 fn rejects_invalid_protected_ids_and_non_call_or_aux_targets() {
     let invalid_id = Engine::default().analyze(&protected_chunk(2, 2)).unwrap();
     assert!(invalid_id.module.diagnostics.iter().any(|diagnostic| {

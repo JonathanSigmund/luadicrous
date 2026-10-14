@@ -84,7 +84,6 @@ pub(super) fn decompile(chunk: &ParsedChunk) -> Result<RecoveredSource, String> 
 
     let mut source = String::with_capacity(prototype.instructions.len().saturating_mul(6));
     source.push_str("-- Decompiled by Luadicrous V2\n");
-    source.push_str("-- Recovery strategy: constant-safe static data\n");
     source.push_str("return ");
     evaluator.write_value(&mut source, &root, 0)?;
     source.push('\n');

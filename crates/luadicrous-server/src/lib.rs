@@ -662,6 +662,8 @@ mod tests {
         let source = String::from_utf8_lossy(&body);
         assert!(source.contains("Decompiled by Luadicrous V2 (took"));
         assert!(source.contains("return 42"));
+        assert!(!source.to_lowercase().contains("recovery strategy"));
+        assert!(!source.to_lowercase().contains("recovery method"));
     }
 
     #[tokio::test]
